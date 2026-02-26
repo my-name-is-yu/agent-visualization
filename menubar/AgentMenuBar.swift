@@ -1010,7 +1010,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         var items: [CountItem] = [
-            CountItem(number: "\(s.total)",     label: "Agents",  numColor: .labelColor),
+            CountItem(number: "\(s.total)",     label: "Sub Agents",  numColor: .labelColor),
         ]
         if s.running > 0 {
             items.append(CountItem(number: "\(s.running)", label: "Running", numColor: .systemBlue))
@@ -1138,11 +1138,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func makeEmptyAgentsView() -> NSView {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 52))
 
-        let header = makeSectionHeader("AGENTS")
+        let header = makeSectionHeader("SUB AGENTS")
         header.frame.origin = CGPoint(x: kPadding, y: 34)
         view.addSubview(header)
 
-        let label = makeSystemLabel("No agents running", size: 13, weight: .regular, color: .secondaryLabelColor)
+        let label = makeSystemLabel("No sub agents running", size: 13, weight: .regular, color: .secondaryLabelColor)
         label.frame.origin = CGPoint(x: kPadding, y: 10)
         view.addSubview(label)
 
@@ -1152,7 +1152,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func makeAgentHeaderView() -> NSView {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 28))
 
-        let header = makeSectionHeader("AGENTS")
+        let header = makeSectionHeader("SUB AGENTS")
         header.frame.origin = CGPoint(x: kPadding, y: 10)
         view.addSubview(header)
 
