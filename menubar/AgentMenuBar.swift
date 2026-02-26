@@ -1210,7 +1210,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Token count for completed agents (right-aligned on second line)
         var tokenLabelWidth: CGFloat = 0
         if agent.status != "running", let tokens = agent.totalTokens, tokens > 0 {
-            let tokenText = formatTokenCount(tokens)
+            let tokenText = formatTokenCount(tokens) + " tokens"
             let tokenLabel = makeMonoLabel(tokenText, size: 10, weight: .regular, color: .tertiaryLabelColor)
             tokenLabel.sizeToFit()
             tokenLabelWidth = tokenLabel.frame.width + 8  // 8px gap from description
@@ -1435,9 +1435,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func formatTokenCount(_ tokens: Int) -> String {
         if tokens >= 1000 {
             let k = Double(tokens) / 1000.0
-            return String(format: "%.1fk token", k)
+            return String(format: "%.1fk", k)
         }
-        return "\(tokens) token"
+        return "\(tokens)"
     }
 
     func formatDuration(_ ms: Int) -> String {
