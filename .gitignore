@@ -1,0 +1,6 @@
+node_modules/
+menubar/AgentMenuBar
+menubar/AgentMenuBar.app/Contents/MacOS/AgentMenuBar
+menubar/AgentMenuBar.app/Contents/_CodeSignature/
+menubar/AgentMenuBar.app/Contents/Resources/
+.claude/
