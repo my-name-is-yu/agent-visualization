@@ -683,12 +683,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // -- Quick Actions --
-        let quickItem = NSMenuItem()
-        quickItem.view = makeQuickActionsView()
-        menu.addItem(quickItem)
-        menu.addItem(NSMenuItem.separator())
-
         // -- Approval Toggle + Reset --
         let toggleItem = NSMenuItem()
         toggleItem.view = makeApprovalToggleView(enabled: s.approvalEnabled)
@@ -1272,41 +1266,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return view
     }
 
-    func makeQuickActionsView() -> NSView {
-        let height: CGFloat = 56
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
-
-        let header = makeSectionHeader("QUICK ACTIONS")
-        header.frame.origin = CGPoint(x: kPadding, y: height - 16)
-        view.addSubview(header)
-
-        let actions: [(String, String, Bool)] = [
-            ("y Allow", "y\n", false),
-            ("n Deny", "n\n", false),
-            ("/clear", "/clear\n", false),
-            ("/compact", "/compact\n", false),
-            ("^C", "c", true),  // Ctrl+C
-        ]
-
-        let btnWidth: CGFloat = (kContentWidth - CGFloat(actions.count - 1) * 6) / CGFloat(actions.count)
-        var x: CGFloat = kPadding
-        for (label, text, isCtrl) in actions {
-            let btn = makeActionButton(title: label, color: .secondaryLabelColor, x: x, y: 4, width: btnWidth)
-            btn.onClick = { [weak self] in
-                self?.statusItem.menu?.cancelTracking()
-                if isCtrl {
-                    self?.sendKeystrokeToTerminal(text, isControlKey: true)
-                } else {
-                    self?.sendKeystrokeToTerminal(text, isControlKey: false)
-                }
-            }
-            view.addSubview(btn)
-            x += btnWidth + 6
-        }
-
-        return view
-    }
-
     func makeApprovalToggleView(enabled: Bool) -> NSView {
         let height: CGFloat = 28
         let view = ClickableRow(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
@@ -1314,10 +1273,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.toggleApproval()
         }
 
-        let icon = enabled ? "☑" : "☐"
-        let text = "\(icon) Tool Approval: \(enabled ? "ON" : "OFF")"
         let color: NSColor = enabled ? .systemBlue : .secondaryLabelColor
-        let label = makeSystemLabel(text, size: 13, weight: .medium, color: color)
+        let symbolName = enabled ? "checkmark.square.fill" : "square"
+        let imageAttachment = NSTextAttachment()
+        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        if let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            imageAttachment.image = img.withSymbolConfiguration(config)
+            let iconSize: CGFloat = 14
+            imageAttachment.bounds = NSRect(x: 0, y: (font.capHeight - iconSize) / 2, width: iconSize, height: iconSize)
+        }
+        let attrStr = NSMutableAttributedString(attachment: imageAttachment)
+        attrStr.append(NSAttributedString(string: " Tool Approval: \(enabled ? "ON" : "OFF")", attributes: [
+            .font: font,
+            .foregroundColor: color
+        ]))
+        let label = NSTextField(labelWithAttributedString: attrStr)
+        label.sizeToFit()
         label.frame.origin = CGPoint(x: kPadding, y: (height - label.frame.height) / 2)
         view.addSubview(label)
 
