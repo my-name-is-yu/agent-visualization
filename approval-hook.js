@@ -8,10 +8,49 @@
 // then output { hookSpecificOutput: { permissionDecision } } on stdout.
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = parseInt(process.env.AGENT_VIZ_PORT || '1217', 10);
 const POLL_INTERVAL_MS = 500;
 const TIMEOUT_MS = 60_000;
+
+// Load allow-list from settings.json once at startup
+function loadAllowPatterns() {
+  try {
+    const settingsPath = path.join(process.env.HOME || '', '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    return (settings.permissions && settings.permissions.allow) || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+// Check if a tool invocation is already allowed by settings.json permissions
+function isAlreadyAllowed(toolName, toolInput, allowPatterns) {
+  const cmd = (toolInput.command || '').trim();
+  for (const pattern of allowPatterns) {
+    // Exact tool match: "Read", "Write", "Edit", etc.
+    if (pattern === toolName) return true;
+    // Bash(pattern) match: "Bash(git *)", "Bash(curl *)", etc.
+    const m = pattern.match(/^Bash\((.+)\)$/);
+    if (m && toolName === 'Bash') {
+      const glob = m[1]; // e.g. "git *"
+      if (glob === '*') return true;
+      // "git *" → command starts with "git "
+      // "pwd" → command equals "pwd"
+      if (glob.endsWith(' *')) {
+        const prefix = glob.slice(0, -2); // "git"
+        if (cmd === prefix || cmd.startsWith(prefix + ' ')) return true;
+      } else if (cmd === glob) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+const allowPatterns = loadAllowPatterns();
 
 // Read all stdin
 let raw = '';
@@ -26,9 +65,17 @@ process.stdin.on('end', () => {
     process.exit(0); // Can't parse → fail-open
   }
 
+  const toolName = data.tool_name || '';
+  const toolInput = data.tool_input || {};
+
+  // Skip if already allowed by settings.json permissions
+  if (isAlreadyAllowed(toolName, toolInput, allowPatterns)) {
+    process.exit(0);
+  }
+
   const body = JSON.stringify({
-    toolName: data.tool_name || '',
-    toolInput: data.tool_input || {},
+    toolName,
+    toolInput,
     sessionId: data.session_id || '',
   });
 

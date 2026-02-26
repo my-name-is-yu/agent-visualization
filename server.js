@@ -5,8 +5,6 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 1217;
 
-// Approximate blended cost ~$9/MTok (configurable via env)
-const COST_PER_TOKEN = parseFloat(process.env.AGENT_VIZ_COST_PER_MTOK || '9') / 1_000_000;
 const BOSS_MODEL = process.env.AGENT_VIZ_BOSS_MODEL || 'opus';
 const BOSS_ACTIVE_MS = 30_000;
 
@@ -230,7 +228,7 @@ function buildState() {
     messages: messages.slice(),
     tasks: buildTasks(),
     sessions: buildSessions(),
-    usage: { ...sessionUsage, estimated_cost_usd: Math.round(sessionUsage.total_tokens * COST_PER_TOKEN * 10000) / 10000, usage_available: sessionUsage.total_tokens > 0 },
+    usage: { ...sessionUsage, usage_available: sessionUsage.total_tokens > 0 },
     approval: {
       enabled: approvalEnabled,
       pending: [...pendingApprovals.values()],
@@ -260,9 +258,6 @@ app.get('/state', (req, res) => {
 // POST /heartbeat - lightweight Boss activity signal
 app.post('/heartbeat', (req, res) => {
   lastEventTime = Date.now();
-  if (req.body && req.body.model) {
-    // Allow runtime model override (not implemented yet, reserved)
-  }
   notifyClients();
   res.json({ ok: true });
 });

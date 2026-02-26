@@ -32,7 +32,6 @@ struct SessionUsage {
     var toolUses: Int = 0
     var durationMs: Int = 0
     var agentCount: Int = 0
-    var estimatedCostUsd: Double = 0
 }
 
 struct SessionInfo {
@@ -477,7 +476,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state.usage.toolUses = usage["tool_uses"] as? Int ?? 0
             state.usage.durationMs = usage["duration_ms"] as? Int ?? 0
             state.usage.agentCount = usage["agent_count"] as? Int ?? 0
-            state.usage.estimatedCostUsd = usage["estimated_cost_usd"] as? Double ?? 0
         }
 
         if let sessions = json["sessions"] as? [[String: Any]] {
@@ -948,7 +946,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             items.append(UsageItem(label: "Duration", value: formatDuration(ms), color: .labelColor))
         }
 
-
         let rowHeight: CGFloat = 22
         let contentHeight = CGFloat(items.count) * rowHeight
         let totalHeight = topPad + titleHeight + 4 + contentHeight + bottomPad
@@ -1005,7 +1002,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let height: CGFloat = 36
         let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
 
-        // Items: "N Agents", "N Tasks", "N Done", optionally "N Error", optionally "$X.XX Cost"
+        // Items: "N Agents", "N Tasks", "N Done", optionally "N Error", optionally "N token"
         struct CountItem {
             let number: String
             let label: String
@@ -1301,7 +1298,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let view = ClickableRow(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
         view.onClick = { [weak self] in
             self?.statusItem.menu?.cancelTracking()
-            self?.sendKeystrokeToTerminal("c", isControlKey: true)
+            self?.sendCtrlCToTerminal()
         }
 
         let label = makeSystemLabel("Cancel Session (^C)", size: 13, weight: .medium, color: .systemRed)
@@ -1328,59 +1325,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Terminal Interaction
 
-    func sendKeystrokeToTerminal(_ text: String, isControlKey: Bool) {
+    func sendCtrlCToTerminal() {
         // Try iTerm2 first, fall back to Terminal.app
-        let script: String
-        if isControlKey {
-            // Send Ctrl+<key> via AppleScript
-            // Try iTerm2 first
-            script = """
-            tell application "System Events"
-                set frontApp to name of first application process whose frontmost is true
+        let script = """
+        tell application "System Events"
+            set frontApp to name of first application process whose frontmost is true
+        end tell
+        if frontApp contains "iTerm" then
+            tell application "iTerm"
+                activate
+                tell current session of current window
+                    write text (ASCII character 3)
+                end tell
             end tell
-            if frontApp contains "iTerm" then
-                tell application "iTerm"
-                    activate
-                    tell current session of current window
-                        write text (ASCII character 3)
-                    end tell
-                end tell
-            else
-                tell application "System Events"
-                    set frontApps to every application process whose name contains "Terminal"
-                    if (count of frontApps) > 0 then
-                        tell application "Terminal" to activate
-                        delay 0.1
-                        keystroke "c" using control down
-                    end if
-                end tell
-            end if
-            """
-        } else {
-            script = """
+        else
             tell application "System Events"
-                set frontApp to name of first application process whose frontmost is true
+                set frontApps to every application process whose name contains "Terminal"
+                if (count of frontApps) > 0 then
+                    tell application "Terminal" to activate
+                    delay 0.1
+                    keystroke "c" using control down
+                end if
             end tell
-            if frontApp contains "iTerm" then
-                tell application "iTerm"
-                    activate
-                    tell current session of current window
-                        write text "\(text.replacingOccurrences(of: "\n", with: ""))"
-                    end tell
-                end tell
-            else
-                tell application "System Events"
-                    set frontApps to every application process whose name contains "Terminal"
-                    if (count of frontApps) > 0 then
-                        tell application "Terminal" to activate
-                        delay 0.1
-                        keystroke "\(text.replacingOccurrences(of: "\n", with: ""))"
-                        keystroke return
-                    end if
-                end tell
-            end if
-            """
-        }
+        end if
+        """
 
         DispatchQueue.global(qos: .userInitiated).async {
             let appleScript = NSAppleScript(source: script)
@@ -1481,19 +1449,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return r > 0 ? "\(m)m \(r)s" : "\(m)m"
     }
 
-    func formatElapsed(_ seconds: Int) -> String {
-        if seconds < 0 { return "0s" }
-        if seconds < 60 { return "\(seconds)s" }
-        let m = seconds / 60
-        let r = seconds % 60
-        return r > 0 ? "\(m)m \(r)s" : "\(m)m"
-    }
-
     func elapsedString(for agent: AgentInfo) -> String? {
         guard agent.status == "running", !agent.startedAt.isEmpty,
               let start = AppDelegate.iso8601.date(from: agent.startedAt) else { return nil }
         let elapsed = Int(Date().timeIntervalSince(start))
-        return formatElapsed(elapsed)
+        return formatDuration(elapsed * 1000)
     }
 
     /// Truncates a string so it fits within maxWidth pixels using the given font.
