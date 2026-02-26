@@ -53,6 +53,26 @@ struct AgentState {
     var agents: [AgentInfo] = []
     var usage = SessionUsage()
     var sessions: [SessionInfo] = []
+    var approvalEnabled: Bool = false
+    var pendingApprovals: [ApprovalRequest] = []
+}
+
+struct ApprovalRequest {
+    let requestId: String
+    let toolName: String
+    let toolInput: [String: Any]
+    let sessionId: String
+    let createdAt: String
+
+    var toolInputSummary: String {
+        if let cmd = toolInput["command"] as? String {
+            return String(cmd.prefix(80))
+        }
+        if let path = toolInput["file_path"] as? String {
+            return (path as NSString).lastPathComponent
+        }
+        return toolName
+    }
 }
 
 // MARK: - Clickable Views
@@ -181,6 +201,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var sseReconnectTimer: Timer?
     var elapsedRefreshTimer: Timer?
     var lastMenuBuildTime: Date = .distantPast
+    var previousPendingCount: Int = 0
 
     override init() {
         if let envPort = ProcessInfo.processInfo.environment["AGENT_VIZ_PORT"],
@@ -383,6 +404,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         previousAgentStatuses = Dictionary(uniqueKeysWithValues: newState.agents.map { ($0.id, $0.status) })
+        // Notify for new pending approvals
+        let newPendingCount = newState.pendingApprovals.count
+        if newPendingCount > previousPendingCount && newPendingCount > 0 {
+            if Bundle.main.bundleIdentifier != nil {
+                let content = UNMutableNotificationContent()
+                content.title = "Tool Approval Required"
+                content.body = "\(newPendingCount) tool(s) waiting for approval"
+                content.sound = .default
+                let request = UNNotificationRequest(identifier: "approval-\(Date().timeIntervalSince1970)", content: content, trigger: nil)
+                UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+            }
+        }
+        previousPendingCount = newPendingCount
     }
 
     func sendNotification(agent: AgentInfo) {
@@ -458,6 +492,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
+        if let approval = json["approval"] as? [String: Any] {
+            state.approvalEnabled = approval["enabled"] as? Bool ?? false
+            if let pending = approval["pending"] as? [[String: Any]] {
+                state.pendingApprovals = pending.map { p in
+                    ApprovalRequest(
+                        requestId: p["requestId"] as? String ?? "",
+                        toolName: p["toolName"] as? String ?? "unknown",
+                        toolInput: p["toolInput"] as? [String: Any] ?? [:],
+                        sessionId: p["sessionId"] as? String ?? "",
+                        createdAt: p["createdAt"] as? String ?? ""
+                    )
+                }
+            }
+        }
+
         return state
     }
 
@@ -510,7 +559,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let s = currentState
 
-        if s.bossStatus == "running" {
+        if !s.pendingApprovals.isEmpty {
+            button.title = " ⚠ \(s.pendingApprovals.count) pending"
+        } else if s.bossStatus == "running" {
             button.title = " running"
         } else if s.bossStatus == "done" {
             button.title = " done"
@@ -553,6 +604,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bossItem.view = makeBossView(s)
         menu.addItem(bossItem)
         menu.addItem(NSMenuItem.separator())
+
+        // -- Pending Approvals --
+        if !s.pendingApprovals.isEmpty {
+            let approvalHeader = NSMenuItem()
+            let headerView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 24))
+            let headerLabel = makeSectionHeader("⚠ PENDING APPROVALS (\(s.pendingApprovals.count))")
+            headerLabel.frame.origin = CGPoint(x: kPadding, y: 6)
+            headerView.addSubview(headerLabel)
+            approvalHeader.view = headerView
+            menu.addItem(approvalHeader)
+
+            for approval in s.pendingApprovals {
+                let item = NSMenuItem()
+                item.view = makeApprovalRow(approval)
+                menu.addItem(item)
+            }
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // -- Summary Row --
         let summaryItem = NSMenuItem()
@@ -613,6 +682,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(NSMenuItem.separator())
+
+        // -- Quick Actions --
+        let quickItem = NSMenuItem()
+        quickItem.view = makeQuickActionsView()
+        menu.addItem(quickItem)
+        menu.addItem(NSMenuItem.separator())
+
+        // -- Approval Toggle + Reset --
+        let toggleItem = NSMenuItem()
+        toggleItem.view = makeApprovalToggleView(enabled: s.approvalEnabled)
+        menu.addItem(toggleItem)
+
         if s.total > 0 {
             let resetItem = NSMenuItem(title: "⟲ Reset", action: #selector(resetServer), keyEquivalent: "r")
             resetItem.target = self
@@ -694,6 +775,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sessionItem.view = sessionView
         menu.addItem(sessionItem)
         menu.addItem(NSMenuItem.separator())
+
+        // -- Cancel Button (only for running agents) --
+        if agent.status == "running" {
+            let cancelItem = NSMenuItem()
+            cancelItem.view = makeCancelButton()
+            menu.addItem(cancelItem)
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // -- Open Full Log Button --
         if let outputFile = agent.outputFile, FileManager.default.fileExists(atPath: outputFile) {
@@ -939,10 +1028,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if s.errored > 0 {
             items.append(CountItem(number: "\(s.errored)", label: "Error", numColor: .systemRed))
         }
-        if s.usage.estimatedCostUsd > 0.001 {
+        if s.usage.totalTokens > 0 {
             items.append(CountItem(
-                number: String(format: "$%.2f", s.usage.estimatedCostUsd),
-                label: "Cost",
+                number: formatTokenCount(s.usage.totalTokens),
+                label: "Tokens",
                 numColor: .systemOrange
             ))
         }
@@ -1154,6 +1243,212 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return view
     }
 
+    // MARK: - Approval Views
+
+    func makeApprovalRow(_ approval: ApprovalRequest) -> NSView {
+        let height: CGFloat = 52
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
+
+        // Tool info
+        let toolLabel = makeSystemLabel("● \(approval.toolName): \(approval.toolInputSummary)", size: 12, weight: .medium, color: .labelColor)
+        toolLabel.frame = NSRect(x: kPadding, y: height - 22, width: kContentWidth, height: 16)
+        toolLabel.lineBreakMode = .byTruncatingTail
+        view.addSubview(toolLabel)
+
+        // Allow button
+        let allowBtn = makeActionButton(title: "Allow", color: .systemGreen, x: kPadding, y: 4, width: 80)
+        allowBtn.onClick = { [weak self] in
+            self?.respondToApproval(requestId: approval.requestId, decision: "allow")
+        }
+        view.addSubview(allowBtn)
+
+        // Deny button
+        let denyBtn = makeActionButton(title: "Deny", color: .systemRed, x: kPadding + 88, y: 4, width: 80)
+        denyBtn.onClick = { [weak self] in
+            self?.respondToApproval(requestId: approval.requestId, decision: "deny")
+        }
+        view.addSubview(denyBtn)
+
+        return view
+    }
+
+    func makeQuickActionsView() -> NSView {
+        let height: CGFloat = 56
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
+
+        let header = makeSectionHeader("QUICK ACTIONS")
+        header.frame.origin = CGPoint(x: kPadding, y: height - 16)
+        view.addSubview(header)
+
+        let actions: [(String, String, Bool)] = [
+            ("y Allow", "y\n", false),
+            ("n Deny", "n\n", false),
+            ("/clear", "/clear\n", false),
+            ("/compact", "/compact\n", false),
+            ("^C", "c", true),  // Ctrl+C
+        ]
+
+        let btnWidth: CGFloat = (kContentWidth - CGFloat(actions.count - 1) * 6) / CGFloat(actions.count)
+        var x: CGFloat = kPadding
+        for (label, text, isCtrl) in actions {
+            let btn = makeActionButton(title: label, color: .secondaryLabelColor, x: x, y: 4, width: btnWidth)
+            btn.onClick = { [weak self] in
+                self?.statusItem.menu?.cancelTracking()
+                if isCtrl {
+                    self?.sendKeystrokeToTerminal(text, isControlKey: true)
+                } else {
+                    self?.sendKeystrokeToTerminal(text, isControlKey: false)
+                }
+            }
+            view.addSubview(btn)
+            x += btnWidth + 6
+        }
+
+        return view
+    }
+
+    func makeApprovalToggleView(enabled: Bool) -> NSView {
+        let height: CGFloat = 28
+        let view = ClickableRow(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
+        view.onClick = { [weak self] in
+            self?.toggleApproval()
+        }
+
+        let icon = enabled ? "☑" : "☐"
+        let text = "\(icon) Tool Approval: \(enabled ? "ON" : "OFF")"
+        let color: NSColor = enabled ? .systemBlue : .secondaryLabelColor
+        let label = makeSystemLabel(text, size: 13, weight: .medium, color: color)
+        label.frame.origin = CGPoint(x: kPadding, y: (height - label.frame.height) / 2)
+        view.addSubview(label)
+
+        return view
+    }
+
+    func makeCancelButton() -> NSView {
+        let height: CGFloat = 32
+        let view = ClickableRow(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
+        view.onClick = { [weak self] in
+            self?.statusItem.menu?.cancelTracking()
+            self?.sendKeystrokeToTerminal("c", isControlKey: true)
+        }
+
+        let label = makeSystemLabel("Cancel Session (^C)", size: 13, weight: .medium, color: .systemRed)
+        label.frame.origin = CGPoint(x: kPadding, y: (height - label.frame.height) / 2)
+        view.addSubview(label)
+
+        return view
+    }
+
+    func makeActionButton(title: String, color: NSColor, x: CGFloat, y: CGFloat, width: CGFloat) -> ClickableRow {
+        let height: CGFloat = 24
+        let btn = ClickableRow(frame: NSRect(x: x, y: y, width: width, height: height))
+        btn.wantsLayer = true
+        btn.layer?.cornerRadius = 4
+        btn.layer?.borderWidth = 1
+        btn.layer?.borderColor = color.cgColor
+
+        let label = makeSystemLabel(title, size: 11, weight: .medium, color: color)
+        label.frame.origin = CGPoint(x: (width - label.frame.width) / 2, y: (height - label.frame.height) / 2)
+        btn.addSubview(label)
+
+        return btn
+    }
+
+    // MARK: - Terminal Interaction
+
+    func sendKeystrokeToTerminal(_ text: String, isControlKey: Bool) {
+        // Try iTerm2 first, fall back to Terminal.app
+        let script: String
+        if isControlKey {
+            // Send Ctrl+<key> via AppleScript
+            // Try iTerm2 first
+            script = """
+            tell application "System Events"
+                set frontApp to name of first application process whose frontmost is true
+            end tell
+            if frontApp contains "iTerm" then
+                tell application "iTerm"
+                    activate
+                    tell current session of current window
+                        write text (ASCII character 3)
+                    end tell
+                end tell
+            else
+                tell application "System Events"
+                    set frontApps to every application process whose name contains "Terminal"
+                    if (count of frontApps) > 0 then
+                        tell application "Terminal" to activate
+                        delay 0.1
+                        keystroke "c" using control down
+                    end if
+                end tell
+            end if
+            """
+        } else {
+            script = """
+            tell application "System Events"
+                set frontApp to name of first application process whose frontmost is true
+            end tell
+            if frontApp contains "iTerm" then
+                tell application "iTerm"
+                    activate
+                    tell current session of current window
+                        write text "\(text.replacingOccurrences(of: "\n", with: ""))"
+                    end tell
+                end tell
+            else
+                tell application "System Events"
+                    set frontApps to every application process whose name contains "Terminal"
+                    if (count of frontApps) > 0 then
+                        tell application "Terminal" to activate
+                        delay 0.1
+                        keystroke "\(text.replacingOccurrences(of: "\n", with: ""))"
+                        keystroke return
+                    end if
+                end tell
+            end if
+            """
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let appleScript = NSAppleScript(source: script)
+            var errorDict: NSDictionary?
+            appleScript?.executeAndReturnError(&errorDict)
+            if let error = errorDict {
+                NSLog("[AgentMenuBar] AppleScript error: %@", error)
+            }
+        }
+    }
+
+    // MARK: - Server Actions
+
+    func respondToApproval(requestId: String, decision: String) {
+        guard let url = URL(string: "http://127.0.0.1:\(serverPort)/approval/respond") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 3
+        let body = try? JSONSerialization.data(withJSONObject: ["requestId": requestId, "decision": decision])
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { [weak self] _, _, _ in
+            DispatchQueue.main.async {
+                self?.fetchState()
+            }
+        }.resume()
+    }
+
+    func toggleApproval() {
+        guard let url = URL(string: "http://127.0.0.1:\(serverPort)/approval/toggle") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 3
+        URLSession.shared.dataTask(with: request) { [weak self] _, _, _ in
+            DispatchQueue.main.async {
+                self?.fetchState()
+            }
+        }.resume()
+    }
+
     // MARK: - Reusable Components
 
     func makeSectionHeader(_ title: String) -> NSTextField {
@@ -1200,9 +1495,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func formatTokenCount(_ tokens: Int) -> String {
         if tokens >= 1000 {
             let k = Double(tokens) / 1000.0
-            return String(format: "%.1fk tok", k)
+            return String(format: "%.1fk token", k)
         }
-        return "\(tokens) tok"
+        return "\(tokens) token"
     }
 
     func formatDuration(_ ms: Int) -> String {

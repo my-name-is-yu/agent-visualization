@@ -38,6 +38,11 @@ const sessionUsage = {
   agent_count: 0,
 };
 
+// Tool approval state
+const pendingApprovals = new Map();   // requestId → {requestId, toolName, toolInput, sessionId, createdAt}
+const approvalDecisions = new Map();  // requestId → {decision, decidedAt}
+let approvalEnabled = false;          // Default OFF
+
 // State persistence
 const STATE_FILE = process.env.AGENT_VIZ_STATE_FILE
   || path.join(process.env.HOME || '/tmp', '.agent-visualization-state.json');
@@ -51,6 +56,7 @@ function saveState() {
       messageCounter,
       sessionUsage,
       lastCompletionTime,
+      approvalEnabled,
     });
     const tmpFile = STATE_FILE + '.tmp';
     fs.writeFileSync(tmpFile, data);
@@ -77,6 +83,7 @@ function loadState() {
     }
     if (data.messageCounter) messageCounter = data.messageCounter;
     if (data.sessionUsage) Object.assign(sessionUsage, data.sessionUsage);
+    if (data.approvalEnabled !== undefined) approvalEnabled = data.approvalEnabled;
     // Don't restore lastCompletionTime — server restart means old grace period is irrelevant
     lastCompletionTime = 0;
     // Fix 1: Clear stale running agents from a previous crash
@@ -224,6 +231,10 @@ function buildState() {
     tasks: buildTasks(),
     sessions: buildSessions(),
     usage: { ...sessionUsage, estimated_cost_usd: Math.round(sessionUsage.total_tokens * COST_PER_TOKEN * 10000) / 10000, usage_available: sessionUsage.total_tokens > 0 },
+    approval: {
+      enabled: approvalEnabled,
+      pending: [...pendingApprovals.values()],
+    },
   };
 }
 
@@ -658,11 +669,90 @@ app.post('/reset', (req, res) => {
   res.json({ ok: true, message: 'State cleared' });
 });
 
+// ── Approval Endpoints ──────────────────────────────────────────────────────
+
+// POST /approval/request - Hook sends approval request
+app.post('/approval/request', (req, res) => {
+  if (!approvalEnabled) {
+    return res.json({ status: 'auto_approved' });
+  }
+  const { toolName, toolInput, sessionId } = req.body || {};
+  const requestId = crypto.randomUUID();
+  const record = {
+    requestId,
+    toolName: toolName || 'unknown',
+    toolInput: typeof toolInput === 'object' ? toolInput : {},
+    sessionId: sessionId || '',
+    createdAt: new Date().toISOString(),
+  };
+  pendingApprovals.set(requestId, record);
+  notifyClients();
+  res.json({ status: 'pending', requestId });
+});
+
+// GET /approval/response/:id - Hook polls for decision
+app.get('/approval/response/:id', (req, res) => {
+  const { id } = req.params;
+  const decision = approvalDecisions.get(id);
+  if (decision) {
+    return res.json({ status: 'decided', decision: decision.decision });
+  }
+  if (pendingApprovals.has(id)) {
+    return res.json({ status: 'pending' });
+  }
+  res.json({ status: 'unknown' });
+});
+
+// POST /approval/respond - Menu bar sends allow/deny decision
+app.post('/approval/respond', (req, res) => {
+  const { requestId, decision } = req.body || {};
+  if (!requestId || !decision) {
+    return res.status(400).json({ error: 'requestId and decision required' });
+  }
+  const pending = pendingApprovals.get(requestId);
+  if (!pending) {
+    return res.status(404).json({ error: 'Unknown or expired request' });
+  }
+  pendingApprovals.delete(requestId);
+  approvalDecisions.set(requestId, { decision, decidedAt: new Date().toISOString() });
+  notifyClients();
+  res.json({ ok: true });
+});
+
+// POST /approval/toggle - Toggle approval mode ON/OFF
+app.post('/approval/toggle', (req, res) => {
+  approvalEnabled = !approvalEnabled;
+  // When turning OFF, auto-approve all pending requests
+  if (!approvalEnabled) {
+    for (const [id] of pendingApprovals) {
+      approvalDecisions.set(id, { decision: 'allow', decidedAt: new Date().toISOString() });
+    }
+    pendingApprovals.clear();
+  }
+  notifyClients();
+  if (Date.now() - lastSaveTime > 5000) saveState();
+  res.json({ ok: true, enabled: approvalEnabled });
+});
+
 // Cleanup: every 60s remove completed/errored agents older than configured time
 const CLEANUP_MS = parseInt(process.env.AGENT_VIZ_CLEANUP_MINUTES || '30', 10) * 60 * 1000;
 
 setInterval(() => {
   const now = Date.now();
+
+  // Cleanup expired approval data
+  const approvalCleanupMs = 5 * 60 * 1000; // 5 minutes for decisions
+  const pendingCleanupMs = 90 * 1000; // 90 seconds for pending
+  for (const [id, record] of approvalDecisions) {
+    if (now - new Date(record.decidedAt).getTime() > approvalCleanupMs) {
+      approvalDecisions.delete(id);
+    }
+  }
+  for (const [id, record] of pendingApprovals) {
+    if (now - new Date(record.createdAt).getTime() > pendingCleanupMs) {
+      pendingApprovals.delete(id);
+    }
+  }
 
   // Mark stale "running" agents as errored (no activity for 5+ minutes)
   const STALE_MS = 5 * 60 * 1000;
