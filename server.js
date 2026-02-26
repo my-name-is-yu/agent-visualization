@@ -259,13 +259,51 @@ app.post('/heartbeat', (req, res) => {
 // POST /complete - Boss signals background agent completion
 app.post('/complete', (req, res) => {
   lastEventTime = Date.now();
-  const { description, result, tokens, tool_uses, duration_ms, is_error } = req.body || {};
+  const { description, result, tokens, tool_uses, duration_ms, is_error, agent_id, tool_use_id } = req.body || {};
 
-  // Find matching running agent by description
-  for (const record of agents.values()) {
-    if (record.status !== 'running') continue;
-    if (description && record.description !== description) continue;
+  // Find matching running agent: try agent_id/tool_use_id first, then description
+  let matchedRecord = null;
 
+  // Tier 1: match by agentId (from task-notification <task-id>)
+  if (agent_id) {
+    for (const record of agents.values()) {
+      if (record.status !== 'running') continue;
+      if (record.agentId === agent_id) { matchedRecord = record; break; }
+    }
+  }
+  // Tier 2: match by tool_use_id (Map key, from task-notification <tool-use-id>)
+  if (!matchedRecord && tool_use_id) {
+    const record = agents.get(tool_use_id);
+    if (record && record.status === 'running') matchedRecord = record;
+  }
+  // Tier 3-4: description-based matching (fallback)
+  if (!matchedRecord && description) {
+    const d = description.toLowerCase();
+    // Tier 3: case-insensitive exact match
+    for (const record of agents.values()) {
+      if (record.status !== 'running') continue;
+      if (record.description.toLowerCase() === d) { matchedRecord = record; break; }
+    }
+    // Tier 4: substring match — pick the most specific (longest description) match
+    if (!matchedRecord) {
+      let bestMatch = null;
+      let bestLen = -1;
+      for (const record of agents.values()) {
+        if (record.status !== 'running') continue;
+        const rd = record.description.toLowerCase();
+        if (rd.includes(d) || d.includes(rd)) {
+          if (rd.length > bestLen) {
+            bestMatch = record;
+            bestLen = rd.length;
+          }
+        }
+      }
+      matchedRecord = bestMatch;
+    }
+  }
+
+  if (matchedRecord) {
+    const record = matchedRecord;
     const errored = is_error === true;
     record.status = errored ? 'errored' : 'completed';
     record.ended_at = new Date().toISOString();
@@ -287,7 +325,6 @@ app.post('/complete', (req, res) => {
     const to_id = record.parent_id || '__user__';
     addMessage(record.id, to_id, 'Response');
     scheduleAutoReset();
-    break;
   }
 
   notifyClients();
@@ -364,6 +401,12 @@ app.post('/event', (req, res) => {
     }
     if (matchedRecord) {
       const record = matchedRecord;
+      // Guard: skip if already completed by /complete endpoint (prevent double-counting)
+      if (record.status !== 'running') {
+        notifyClients();
+        res.json({ ok: true });
+        return;
+      }
       record.last_activity = new Date().toISOString();
       const ended_at = new Date();
       const errored = isError(is_error, tool_output);
