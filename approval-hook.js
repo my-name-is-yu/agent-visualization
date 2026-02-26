@@ -26,28 +26,49 @@ function loadAllowPatterns() {
   }
 }
 
-// Check if a tool invocation is already allowed by settings.json permissions
-function isAlreadyAllowed(toolName, toolInput, allowPatterns) {
-  const cmd = (toolInput.command || '').trim();
+// Check if a single command token matches any Bash(...) allow pattern
+function matchesBashPattern(cmd, allowPatterns) {
   for (const pattern of allowPatterns) {
-    // Exact tool match: "Read", "Write", "Edit", etc.
-    if (pattern === toolName) return true;
-    // Bash(pattern) match: "Bash(git *)", "Bash(curl *)", etc.
     const m = pattern.match(/^Bash\((.+)\)$/);
-    if (m && toolName === 'Bash') {
-      const glob = m[1]; // e.g. "git *"
-      if (glob === '*') return true;
-      // "git *" → command starts with "git "
-      // "pwd" → command equals "pwd"
-      if (glob.endsWith(' *')) {
-        const prefix = glob.slice(0, -2); // "git"
-        if (cmd === prefix || cmd.startsWith(prefix + ' ')) return true;
-      } else if (cmd === glob) {
-        return true;
-      }
+    if (!m) continue;
+    const glob = m[1]; // e.g. "git *"
+    if (glob === '*') return true;
+    if (glob.endsWith(' *')) {
+      const prefix = glob.slice(0, -2); // "git"
+      if (cmd === prefix || cmd.startsWith(prefix + ' ')) return true;
+    } else if (cmd === glob) {
+      return true;
     }
   }
   return false;
+}
+
+// Navigation commands that are always safe (no side effects beyond cwd)
+const SAFE_NAVIGATION = new Set(['cd', 'pushd', 'popd']);
+
+// Check if a tool invocation is already allowed by settings.json permissions
+function isAlreadyAllowed(toolName, toolInput, allowPatterns) {
+  // Exact tool match: "Read", "Write", "Edit", etc.
+  for (const pattern of allowPatterns) {
+    if (pattern === toolName) return true;
+  }
+  if (toolName !== 'Bash') return false;
+
+  const fullCmd = (toolInput.command || '').trim();
+  if (!fullCmd) return false;
+
+  // Split on && || ; to get individual commands in a chain
+  // e.g. "cd /foo && npm test" → ["cd /foo", "npm test"]
+  const parts = fullCmd.split(/\s*(?:&&|\|\||;)\s*/);
+
+  // ALL parts must be allowed (or be safe navigation)
+  return parts.every(part => {
+    const trimmed = part.trim();
+    if (!trimmed) return true; // empty segment
+    const firstWord = trimmed.split(/\s+/)[0];
+    if (SAFE_NAVIGATION.has(firstWord)) return true;
+    return matchesBashPattern(trimmed, allowPatterns);
+  });
 }
 
 const allowPatterns = loadAllowPatterns();
