@@ -1213,97 +1213,99 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Summary View
 
     func makeSummaryView(_ s: AgentState) -> NSView {
-        let height: CGFloat = 36
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
-
-        // Items: "N Agents", "N Tasks", "N Done", optionally "N Error", optionally "N token"
         struct CountItem {
             let number: String
             let label: String
             let numColor: NSColor
         }
 
-        var items: [CountItem] = [
-            CountItem(number: "\(s.total)",     label: "Sub Agents",  numColor: .labelColor),
+        // Row 1: agent counts
+        var row1: [CountItem] = [
+            CountItem(number: "\(s.total)", label: "Sub Agents", numColor: .labelColor),
         ]
         if s.running > 0 {
-            items.append(CountItem(number: "\(s.running)", label: "Running", numColor: .systemBlue))
+            row1.append(CountItem(number: "\(s.running)", label: "Running", numColor: .systemBlue))
         }
-        items.append(CountItem(number: "\(s.completed)", label: "Done", numColor: .systemGreen))
+        row1.append(CountItem(number: "\(s.completed)", label: "Done", numColor: .systemGreen))
         if s.errored > 0 {
-            items.append(CountItem(number: "\(s.errored)", label: "Error", numColor: .systemRed))
+            row1.append(CountItem(number: "\(s.errored)", label: "Error", numColor: .systemRed))
         }
+
+        // Row 2: tokens + session time
+        var row2: [CountItem] = []
         if s.usage.totalTokens > 0 {
-            items.append(CountItem(
+            row2.append(CountItem(
                 number: formatTokenCount(s.usage.totalTokens),
                 label: "Tokens",
                 numColor: .systemOrange
             ))
         }
-
-        // Session elapsed time
         if let startStr = s.sessionStartTime, !startStr.isEmpty,
            let startDate = AppDelegate.iso8601.date(from: startStr) {
             let elapsedSecs = Int(Date().timeIntervalSince(startDate))
             if elapsedSecs > 0 {
-                items.append(CountItem(
+                row2.append(CountItem(
                     number: formatDuration(elapsedSecs * 1000),
                     label: "Session",
                     numColor: .systemPurple
                 ))
             }
         }
-
-        // Adaptive sizing: shrink font and spacing when many items
-        let fontSize: CGFloat = items.count > 5 ? 12 : 14
-        let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
-        let labelFont = NSFont.systemFont(ofSize: fontSize, weight: .bold)
-
-        // Measure total width so we can center the row
-        var spacing: CGFloat = items.count > 5 ? 12 : 20
-        var totalWidth: CGFloat = 0
-        var widths: [(CGFloat, CGFloat)] = [] // (numW, labelW) per item
-        for (i, item) in items.enumerated() {
-            let numW = (item.number as NSString).size(withAttributes: [.font: font]).width
-            let lblW = (item.label as NSString).size(withAttributes: [.font: labelFont]).width
-            widths.append((ceil(numW), ceil(lblW)))
-            totalWidth += ceil(numW) + 4 + ceil(lblW)
-            if i < items.count - 1 { totalWidth += spacing }
+        if s.usage.toolUses > 0 {
+            row2.append(CountItem(
+                number: "\(s.usage.toolUses)",
+                label: "Tools",
+                numColor: .secondaryLabelColor
+            ))
         }
 
-        // If still overflows, compress spacing further
-        let maxWidth = kMenuWidth - 16
-        if totalWidth > maxWidth && items.count > 1 {
-            let itemsWidth = widths.reduce(CGFloat(0)) { $0 + $1.0 + 4 + $1.1 }
-            spacing = max(4, (maxWidth - itemsWidth) / CGFloat(items.count - 1))
-            totalWidth = itemsWidth + spacing * CGFloat(items.count - 1)
+        let rowH: CGFloat = 22
+        let hasRow2 = !row2.isEmpty
+        let height: CGFloat = hasRow2 ? rowH * 2 + 4 : rowH + 8
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
+
+        let font = NSFont.systemFont(ofSize: 13, weight: .bold)
+
+        func layoutRow(_ items: [CountItem], y: CGFloat) {
+            let spacing: CGFloat = 18
+            var totalWidth: CGFloat = 0
+            var widths: [(CGFloat, CGFloat)] = []
+            for (i, item) in items.enumerated() {
+                let numW = ceil((item.number as NSString).size(withAttributes: [.font: font]).width)
+                let lblW = ceil((item.label as NSString).size(withAttributes: [.font: font]).width)
+                widths.append((numW, lblW))
+                totalWidth += numW + 4 + lblW
+                if i < items.count - 1 { totalWidth += spacing }
+            }
+            var x = max(8, (kMenuWidth - totalWidth) / 2)
+            for (i, item) in items.enumerated() {
+                let (numW, lblW) = widths[i]
+                let numLabel = NSTextField(labelWithAttributedString: NSAttributedString(
+                    string: item.number,
+                    attributes: [.font: font, .foregroundColor: item.numColor]
+                ))
+                numLabel.sizeToFit()
+                numLabel.frame.origin = CGPoint(x: x, y: y)
+                view.addSubview(numLabel)
+                x += numW + 4
+
+                let lblLabel = NSTextField(labelWithAttributedString: NSAttributedString(
+                    string: item.label,
+                    attributes: [.font: font, .foregroundColor: NSColor.labelColor]
+                ))
+                lblLabel.sizeToFit()
+                lblLabel.frame.origin = CGPoint(x: x, y: y)
+                view.addSubview(lblLabel)
+                x += lblW
+                if i < items.count - 1 { x += spacing }
+            }
         }
 
-        var x = max(8, (kMenuWidth - totalWidth) / 2)
-        let baseline: CGFloat = (height - 17) / 2  // vertically center the 14pt text
-
-        for (i, item) in items.enumerated() {
-            let (numW, lblW) = widths[i]
-
-            let numLabel = NSTextField(labelWithAttributedString: NSAttributedString(
-                string: item.number,
-                attributes: [.font: font, .foregroundColor: item.numColor]
-            ))
-            numLabel.sizeToFit()
-            numLabel.frame.origin = CGPoint(x: x, y: baseline)
-            view.addSubview(numLabel)
-            x += numW + 4
-
-            let lblLabel = NSTextField(labelWithAttributedString: NSAttributedString(
-                string: item.label,
-                attributes: [.font: labelFont, .foregroundColor: NSColor.labelColor]
-            ))
-            lblLabel.sizeToFit()
-            lblLabel.frame.origin = CGPoint(x: x, y: baseline)
-            view.addSubview(lblLabel)
-            x += lblW
-
-            if i < items.count - 1 { x += spacing }
+        if hasRow2 {
+            layoutRow(row1, y: rowH + 4)
+            layoutRow(row2, y: 2)
+        } else {
+            layoutRow(row1, y: (height - 17) / 2)
         }
 
         return view
