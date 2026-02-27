@@ -1,4 +1,4 @@
-import type { AgentRecord, Message, SessionUsage, SessionInfo, TaskInfo, AppState, BossState, ApprovalRecord, ApprovalDecision } from './types.js';
+import type { AgentRecord, Message, SessionUsage, SessionInfo, TaskInfo, AppState, BossState, ApprovalRecord, ApprovalDecision, CurrentToolInfo, LastSessionSummary } from './types.js';
 import { config } from './config.js';
 import {
   initDb, migrateFromJson,
@@ -36,6 +36,18 @@ export function setApprovalEnabled(value: boolean): void {
   approvalEnabled = value;
 }
 
+// Current tool tracking
+export let currentTool: CurrentToolInfo | null = null;
+export function setCurrentTool(tool: CurrentToolInfo | null): void {
+  currentTool = tool;
+}
+
+// Session timing
+export let sessionStartTime: string | null = null;
+
+// Session history (survives reset)
+export let lastSessionSummary: LastSessionSummary | null = null;
+
 // Timing state
 export let lastEventTime = 0;
 export let lastCompletionTime = 0;
@@ -43,6 +55,10 @@ let autoResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function setLastEventTime(t: number): void {
   lastEventTime = t;
+  if (!sessionStartTime) {
+    sessionStartTime = new Date(t).toISOString();
+    try { saveMeta('sessionStartTime', sessionStartTime); } catch { /* ignore */ }
+  }
 }
 
 export function setLastCompletionTime(t: number): void {
@@ -134,6 +150,16 @@ export function loadFromDb(): void {
     } catch { /* ignore */ }
   }
 
+  // Restore session start time
+  const savedStartTime = loadMeta('sessionStartTime');
+  if (savedStartTime) sessionStartTime = savedStartTime;
+
+  // Restore last session summary
+  const savedSummary = loadMeta('lastSessionSummary');
+  if (savedSummary) {
+    try { lastSessionSummary = JSON.parse(savedSummary); } catch { /* ignore */ }
+  }
+
   console.log(`[state] Loaded from DB: ${agents.size} agents, ${messages.length} messages`);
 }
 
@@ -182,6 +208,29 @@ export function notifyClients(): void {
     } catch {
       sseClients.delete(client);
     }
+  }
+}
+
+// ── Tool Summary ──────────────────────────────────────────────────────────────
+
+export function summarizeToolInput(toolName: string, toolInput: Record<string, unknown>): string {
+  switch (toolName) {
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+      return String(toolInput.file_path || '').split('/').slice(-2).join('/');
+    case 'Bash':
+      return String(toolInput.command || '').slice(0, 80);
+    case 'Grep':
+      return `/${toolInput.pattern || ''}/ ${String(toolInput.path || '').split('/').slice(-2).join('/')}`.slice(0, 80);
+    case 'Glob':
+      return String(toolInput.pattern || '').slice(0, 60);
+    case 'WebFetch':
+      return String(toolInput.url || '').slice(0, 80);
+    case 'WebSearch':
+      return String(toolInput.query || '').slice(0, 80);
+    default:
+      return toolName;
   }
 }
 
@@ -251,12 +300,27 @@ export function buildState(): AppState {
       enabled: approvalEnabled,
       pending: [...pendingApprovals.values()],
     },
+    currentTool: bossStatus === 'running' ? currentTool : null,
+    sessionStartTime,
+    lastSessionSummary,
   };
 }
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
 
 export function resetState(): void {
+  // Snapshot current session before clearing
+  if (agents.size > 0 || sessionUsage.total_tokens > 0) {
+    lastSessionSummary = {
+      totalAgents: agents.size,
+      totalTokens: sessionUsage.total_tokens,
+      totalToolUses: sessionUsage.tool_uses,
+      durationMs: sessionUsage.duration_ms,
+      completedAt: new Date().toISOString(),
+    };
+    try { saveMeta('lastSessionSummary', JSON.stringify(lastSessionSummary)); } catch { /* ignore */ }
+  }
+
   agents.clear();
   messages.length = 0;
   messageCounter = 0;
@@ -265,6 +329,11 @@ export function resetState(): void {
   sessionUsage.duration_ms = 0;
   sessionUsage.agent_count = 0;
   lastEventTime = 0;
+  lastCompletionTime = 0;
+
+  // Also clear session-specific state
+  currentTool = null;
+  sessionStartTime = null;
 
   // Clear SQLite tables
   try {

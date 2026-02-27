@@ -6,6 +6,7 @@ import {
   agents, sessionUsage, addMessage, notifyClients, persistAgent,
   setLastEventTime, setLastCompletionTime,
   lastCompletionTime, scheduleAutoReset, cancelAutoReset, resetState,
+  setCurrentTool, summarizeToolInput,
 } from '../state.js';
 
 const router = Router();
@@ -23,6 +24,10 @@ router.post('/event', (req, res) => {
 
   // Non-agent tool calls — just update lastEventTime
   if (tool_name !== 'Task' && tool_name !== 'TaskOutput') {
+    if (hook_phase === 'pre' && tool_name) {
+      const summary = summarizeToolInput(tool_name, tool_input as Record<string, unknown>);
+      setCurrentTool({ toolName: tool_name, summary, timestamp: new Date().toISOString() });
+    }
     notifyClients();
     res.json({ ok: true });
     return;

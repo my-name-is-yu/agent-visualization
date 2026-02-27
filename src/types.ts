@@ -62,6 +62,20 @@ export interface BossState {
   model: string;
 }
 
+export interface CurrentToolInfo {
+  toolName: string;
+  summary: string;
+  timestamp: string;
+}
+
+export interface LastSessionSummary {
+  totalAgents: number;
+  totalTokens: number;
+  totalToolUses: number;
+  durationMs: number;
+  completedAt: string;
+}
+
 // ── Approval ──────────────────────────────────────────────────────────────────
 
 export interface ApprovalRecord {
@@ -106,6 +120,9 @@ export interface AppState {
     enabled: boolean;
     pending: ApprovalRecord[];
   };
+  currentTool: CurrentToolInfo | null;
+  sessionStartTime: string | null;
+  lastSessionSummary: LastSessionSummary | null;
 }
 
 // ── Zod Schemas (request validation) ──────────────────────────────────────────

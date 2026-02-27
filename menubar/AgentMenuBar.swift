@@ -25,6 +25,8 @@ struct AgentInfo {
     let startedAt: String
     let totalTokens: Int?
     let toolUses: Int?
+    let error: String?
+    let lastActivity: String?
 }
 
 struct SessionUsage {
@@ -54,6 +56,11 @@ struct AgentState {
     var sessions: [SessionInfo] = []
     var approvalEnabled: Bool = false
     var pendingApprovals: [ApprovalRequest] = []
+    var currentTool: CurrentToolInfo? = nil
+    var sessionStartTime: String? = nil
+    var lastSessionSummary: LastSessionSummary? = nil
+    var tasks: [TaskInfo] = []
+    var recentMessages: [MessageInfo] = []
 }
 
 struct ApprovalRequest {
@@ -72,6 +79,35 @@ struct ApprovalRequest {
         }
         return toolName
     }
+}
+
+struct CurrentToolInfo {
+    let toolName: String
+    let summary: String
+    let timestamp: String
+}
+
+struct TaskInfo {
+    let id: String
+    let name: String
+    let status: String
+    let subagentType: String
+}
+
+struct MessageInfo {
+    let id: String
+    let fromId: String
+    let toId: String
+    let type: String
+    let timestamp: String
+}
+
+struct LastSessionSummary {
+    let totalAgents: Int
+    let totalTokens: Int
+    let totalToolUses: Int
+    let durationMs: Int
+    let completedAt: String
 }
 
 // MARK: - Clickable Views
@@ -265,6 +301,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
+
+        // Global hotkey: Ctrl+Shift+A to toggle menu
+        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.modifierFlags.contains([.control, .shift]),
+               event.charactersIgnoringModifiers == "a" {
+                DispatchQueue.main.async {
+                    self?.statusItem.button?.performClick(nil)
+                }
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -455,10 +501,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var state = AgentState()
 
         if let summary = json["summary"] as? [String: Any] {
-            state.total = summary["total"] as? Int ?? 0
-            state.running = summary["running"] as? Int ?? 0
-            state.completed = summary["completed"] as? Int ?? 0
-            state.errored = summary["errored"] as? Int ?? 0
+            state.total = jsonIntDefault(summary["total"])
+            state.running = jsonIntDefault(summary["running"])
+            state.completed = jsonIntDefault(summary["completed"])
+            state.errored = jsonIntDefault(summary["errored"])
         }
 
         if let boss = json["boss"] as? [String: Any] {
@@ -475,34 +521,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     subagentType: a["subagent_type"] as? String ?? "unknown",
                     status: a["status"] as? String ?? "unknown",
                     parentId: a["parent_id"] as? String,
-                    durationMs: a["duration_ms"] as? Int,
+                    durationMs: jsonInt(a["duration_ms"]),
                     sessionId: a["session_id"] as? String ?? "unknown",
                     outputPreview: a["output_preview"] as? String,
                     outputFile: a["output_file"] as? String,
                     prompt: a["prompt"] as? String,
                     background: a["background"] as? Bool ?? false,
                     startedAt: a["started_at"] as? String ?? "",
-                    totalTokens: agentUsage?["total_tokens"] as? Int,
-                    toolUses: agentUsage?["tool_uses"] as? Int
+                    totalTokens: jsonInt(agentUsage?["total_tokens"]),
+                    toolUses: jsonInt(agentUsage?["tool_uses"]),
+                    error: a["error"] as? String,
+                    lastActivity: a["last_activity"] as? String
                 )
             }
         }
 
         if let usage = json["usage"] as? [String: Any] {
-            state.usage.totalTokens = usage["total_tokens"] as? Int ?? 0
-            state.usage.toolUses = usage["tool_uses"] as? Int ?? 0
-            state.usage.durationMs = usage["duration_ms"] as? Int ?? 0
-            state.usage.agentCount = usage["agent_count"] as? Int ?? 0
+            state.usage.totalTokens = jsonIntDefault(usage["total_tokens"])
+            state.usage.toolUses = jsonIntDefault(usage["tool_uses"])
+            state.usage.durationMs = jsonIntDefault(usage["duration_ms"])
+            state.usage.agentCount = jsonIntDefault(usage["agent_count"])
         }
 
         if let sessions = json["sessions"] as? [[String: Any]] {
             state.sessions = sessions.map { s in
                 SessionInfo(
                     sessionId: s["session_id"] as? String ?? "unknown",
-                    agentCount: s["agent_count"] as? Int ?? 0,
-                    running: s["running"] as? Int ?? 0,
-                    completed: s["completed"] as? Int ?? 0,
-                    errored: s["errored"] as? Int ?? 0
+                    agentCount: jsonIntDefault(s["agent_count"]),
+                    running: jsonIntDefault(s["running"]),
+                    completed: jsonIntDefault(s["completed"]),
+                    errored: jsonIntDefault(s["errored"])
                 )
             }
         }
@@ -519,6 +567,54 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         createdAt: p["createdAt"] as? String ?? ""
                     )
                 }
+            }
+        }
+
+        // Current tool
+        if let tool = json["currentTool"] as? [String: Any] {
+            state.currentTool = CurrentToolInfo(
+                toolName: tool["toolName"] as? String ?? "",
+                summary: tool["summary"] as? String ?? "",
+                timestamp: tool["timestamp"] as? String ?? ""
+            )
+        }
+
+        // Session start time
+        state.sessionStartTime = json["sessionStartTime"] as? String
+
+        // Last session summary
+        if let last = json["lastSessionSummary"] as? [String: Any] {
+            state.lastSessionSummary = LastSessionSummary(
+                totalAgents: jsonIntDefault(last["totalAgents"]),
+                totalTokens: jsonIntDefault(last["totalTokens"]),
+                totalToolUses: jsonIntDefault(last["totalToolUses"]),
+                durationMs: jsonIntDefault(last["durationMs"]),
+                completedAt: last["completedAt"] as? String ?? ""
+            )
+        }
+
+        // Tasks
+        if let tasks = json["tasks"] as? [[String: Any]] {
+            state.tasks = tasks.map { t in
+                TaskInfo(
+                    id: t["id"] as? String ?? "",
+                    name: t["name"] as? String ?? "",
+                    status: t["status"] as? String ?? "unknown",
+                    subagentType: t["subagent_type"] as? String ?? "unknown"
+                )
+            }
+        }
+
+        // Messages
+        if let msgs = json["messages"] as? [[String: Any]] {
+            state.recentMessages = msgs.suffix(5).map { m in
+                MessageInfo(
+                    id: m["id"] as? String ?? "",
+                    fromId: m["from_id"] as? String ?? "",
+                    toId: m["to_id"] as? String ?? "",
+                    type: m["type"] as? String ?? "",
+                    timestamp: m["timestamp"] as? String ?? ""
+                )
             }
         }
 
@@ -620,6 +716,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(bossItem)
         menu.addItem(NSMenuItem.separator())
 
+        // -- Tasks Summary (when 4+ agents/tasks) --
+        if s.tasks.count >= 4 || s.agents.count >= 4 {
+            let tasksToShow = s.tasks.isEmpty ? s.agents.map {
+                TaskInfo(id: $0.id, name: $0.description, status: $0.status, subagentType: $0.subagentType)
+            } : s.tasks
+            if !tasksToShow.isEmpty {
+                let taskItem = NSMenuItem()
+                taskItem.view = makeTasksSummaryView(tasksToShow)
+                menu.addItem(taskItem)
+                menu.addItem(NSMenuItem.separator())
+            }
+        }
+
         // -- Pending Approvals --
         if !s.pendingApprovals.isEmpty {
             let approvalHeader = NSMenuItem()
@@ -649,6 +758,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let emptyItem = NSMenuItem()
             emptyItem.view = makeEmptyAgentsView()
             menu.addItem(emptyItem)
+
+            // Show last session summary if available
+            if let lastSummary = s.lastSessionSummary {
+                let lastItem = NSMenuItem()
+                lastItem.view = makeLastSessionView(lastSummary)
+                menu.addItem(lastItem)
+            }
         } else {
             let sessionIds = Set(s.agents.map { $0.sessionId })
             if sessionIds.count > 1 {
@@ -696,6 +812,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
+        // -- Recent Messages --
+        if !s.recentMessages.isEmpty {
+            menu.addItem(NSMenuItem.separator())
+            let msgItem = NSMenuItem()
+            msgItem.view = makeRecentMessagesView(s.recentMessages, agents: s.agents)
+            menu.addItem(msgItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         // -- Approval Toggle + Reset --
@@ -737,6 +861,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         headerItem.view = makeDetailHeader(agent)
         menu.addItem(headerItem)
         menu.addItem(NSMenuItem.separator())
+
+        // -- Error Section (if errored) --
+        if let agentError = agent.error, !agentError.isEmpty {
+            let errorItem = NSMenuItem()
+            errorItem.view = makeErrorDetailSection(content: agentError)
+            menu.addItem(errorItem)
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // -- Description Section --
         let descItem = NSMenuItem()
@@ -939,6 +1071,71 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return view
     }
 
+    func makeErrorDetailSection(content: String, maxHeight: CGFloat = 120) -> NSView {
+        let titleFont = NSFont.systemFont(ofSize: 11, weight: .bold)
+        let contentFont = NSFont.systemFont(ofSize: 13, weight: .regular)
+        let titleHeight: CGFloat = 18
+        let topPad: CGFloat = 8
+        let midPad: CGFloat = 4
+        let bottomPad: CGFloat = 8
+
+        let textStorage = NSTextStorage(string: content, attributes: [
+            .font: contentFont,
+            .foregroundColor: NSColor.systemRed
+        ])
+        let textContainer = NSTextContainer(containerSize: NSSize(width: kContentWidth - 10, height: .greatestFiniteMagnitude))
+        textContainer.lineFragmentPadding = 5
+        let layoutManager = NSLayoutManager()
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+        layoutManager.ensureLayout(for: textContainer)
+        let naturalHeight = max(layoutManager.usedRect(for: textContainer).height + 4, 18)
+
+        let needsScroll = naturalHeight > maxHeight
+        let contentHeight = needsScroll ? maxHeight : naturalHeight
+
+        let totalHeight = topPad + titleHeight + midPad + contentHeight + bottomPad
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: totalHeight))
+
+        let titleLabel = NSTextField(labelWithAttributedString: NSAttributedString(
+            string: "ERROR",
+            attributes: [
+                .font: titleFont,
+                .foregroundColor: NSColor.systemRed,
+                .kern: 1.2 as NSNumber
+            ]
+        ))
+        titleLabel.sizeToFit()
+        titleLabel.frame.origin = CGPoint(x: kPadding, y: totalHeight - topPad - titleHeight)
+        view.addSubview(titleLabel)
+
+        let scrollView = NSScrollView(frame: NSRect(x: kPadding, y: bottomPad, width: kContentWidth, height: contentHeight))
+        scrollView.hasVerticalScroller = needsScroll
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.scrollerStyle = .overlay
+
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: kContentWidth, height: contentHeight))
+        textView.string = content
+        textView.font = contentFont
+        textView.textColor = .systemRed
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 0, height: 2)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: kContentWidth, height: .greatestFiniteMagnitude)
+        textView.textContainer?.lineFragmentPadding = 5
+
+        scrollView.documentView = textView
+        view.addSubview(scrollView)
+
+        return view
+    }
+
     func makeUsageSection(_ agent: AgentInfo) -> NSView {
         let titleFont = NSFont.systemFont(ofSize: 11, weight: .bold)
         let titleHeight: CGFloat = 18
@@ -1044,11 +1241,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ))
         }
 
-        let font = NSFont.systemFont(ofSize: 14, weight: .bold)
-        let labelFont = NSFont.systemFont(ofSize: 14, weight: .bold)
+        // Session elapsed time
+        if let startStr = s.sessionStartTime, !startStr.isEmpty,
+           let startDate = AppDelegate.iso8601.date(from: startStr) {
+            let elapsedSecs = Int(Date().timeIntervalSince(startDate))
+            if elapsedSecs > 0 {
+                items.append(CountItem(
+                    number: formatDuration(elapsedSecs * 1000),
+                    label: "Session",
+                    numColor: .systemPurple
+                ))
+            }
+        }
+
+        // Cost estimate
+        if s.usage.totalTokens > 0 {
+            let cost = estimateSessionCost(s)
+            items.append(CountItem(
+                number: formatCost(cost),
+                label: "Cost",
+                numColor: .systemOrange
+            ))
+        }
+
+        // Adaptive sizing: shrink font and spacing when many items
+        let fontSize: CGFloat = items.count > 5 ? 12 : 14
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+        let labelFont = NSFont.systemFont(ofSize: fontSize, weight: .bold)
 
         // Measure total width so we can center the row
-        let spacing: CGFloat = 20
+        var spacing: CGFloat = items.count > 5 ? 12 : 20
         var totalWidth: CGFloat = 0
         var widths: [(CGFloat, CGFloat)] = [] // (numW, labelW) per item
         for (i, item) in items.enumerated() {
@@ -1059,7 +1281,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if i < items.count - 1 { totalWidth += spacing }
         }
 
-        var x = (kMenuWidth - totalWidth) / 2
+        // If still overflows, compress spacing further
+        let maxWidth = kMenuWidth - 16
+        if totalWidth > maxWidth && items.count > 1 {
+            let itemsWidth = widths.reduce(CGFloat(0)) { $0 + $1.0 + 4 + $1.1 }
+            spacing = max(4, (maxWidth - itemsWidth) / CGFloat(items.count - 1))
+            totalWidth = itemsWidth + spacing * CGFloat(items.count - 1)
+        }
+
+        var x = max(8, (kMenuWidth - totalWidth) / 2)
         let baseline: CGFloat = (height - 17) / 2  // vertically center the 14pt text
 
         for (i, item) in items.enumerated() {
@@ -1089,6 +1319,88 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return view
     }
 
+    // MARK: - Tasks Summary View
+
+    func makeTasksSummaryView(_ tasks: [TaskInfo]) -> NSView {
+        let rowH: CGFloat = 20
+        let headerH: CGFloat = 24
+        let totalHeight = headerH + CGFloat(tasks.count) * rowH + 8
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: totalHeight))
+
+        let header = makeSectionHeader("TASKS (\(tasks.count))")
+        header.frame.origin = CGPoint(x: kPadding, y: totalHeight - 18)
+        view.addSubview(header)
+
+        for (i, task) in tasks.enumerated() {
+            let y = totalHeight - headerH - CGFloat(i + 1) * rowH
+            let (dot, dotColor) = statusDisplay(task.status)
+            let dotLabel = makeSystemLabel(dot, size: 10, weight: .regular, color: dotColor)
+            dotLabel.frame.origin = CGPoint(x: kPadding + 4, y: y + 2)
+            view.addSubview(dotLabel)
+
+            let info = "\(task.subagentType): \(task.name)"
+            let maxW = kContentWidth - 30
+            let infoText = truncateToWidth(info, maxWidth: maxW, font: NSFont.systemFont(ofSize: 11))
+            let infoLabel = makeSystemLabel(infoText, size: 11, weight: .regular, color: .secondaryLabelColor)
+            infoLabel.frame.origin = CGPoint(x: kPadding + 20, y: y + 2)
+            view.addSubview(infoLabel)
+        }
+
+        return view
+    }
+
+    // MARK: - Recent Messages View
+
+    func makeRecentMessagesView(_ messages: [MessageInfo], agents: [AgentInfo]) -> NSView {
+        let rowH: CGFloat = 18
+        let headerH: CGFloat = 24
+        let totalHeight = headerH + CGFloat(messages.count) * rowH + 8
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: totalHeight))
+
+        let header = makeSectionHeader("RECENT MESSAGES")
+        header.frame.origin = CGPoint(x: kPadding, y: totalHeight - 18)
+        view.addSubview(header)
+
+        let agentNameMap: [String: String] = {
+            var m = [String: String]()
+            m["__user__"] = "boss"
+            for a in agents {
+                m[a.id] = a.subagentType
+            }
+            return m
+        }()
+
+        for (i, msg) in messages.enumerated() {
+            let y = totalHeight - headerH - CGFloat(i + 1) * rowH
+            let fromName = agentNameMap[msg.fromId] ?? String(msg.fromId.prefix(8))
+            let toName = agentNameMap[msg.toId] ?? String(msg.toId.prefix(8))
+            let msgText = "\(fromName) -> \(toName) (\(msg.type))"
+            let maxW = kContentWidth - 8
+            let truncMsg = truncateToWidth(msgText, maxWidth: maxW, font: NSFont.systemFont(ofSize: 10))
+            let msgLabel = makeSystemLabel(truncMsg, size: 10, weight: .regular, color: .tertiaryLabelColor)
+            msgLabel.frame.origin = CGPoint(x: kPadding + 4, y: y + 1)
+            view.addSubview(msgLabel)
+        }
+
+        return view
+    }
+
+    // MARK: - Last Session View
+
+    func makeLastSessionView(_ summary: LastSessionSummary) -> NSView {
+        let height: CGFloat = 32
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
+
+        let durText = formatDuration(summary.durationMs)
+        let tokText = formatTokenCount(summary.totalTokens)
+        let text = "Last session: \(summary.totalAgents) agents, \(tokText) tokens, \(durText)"
+        let label = makeSystemLabel(text, size: 12, weight: .regular, color: .tertiaryLabelColor)
+        label.frame.origin = CGPoint(x: kPadding, y: (height - label.frame.height) / 2)
+        view.addSubview(label)
+
+        return view
+    }
+
     // MARK: - Error View
 
     func makeErrorView(_ message: String) -> NSView {
@@ -1108,7 +1420,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Boss View
 
     func makeBossView(_ s: AgentState) -> NSView {
-        let rowHeight: CGFloat = 48
+        let hasToolInfo = s.currentTool != nil && s.bossStatus == "running"
+        let rowHeight: CGFloat = hasToolInfo ? 64 : 48
         let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: rowHeight))
 
         let header = makeSectionHeader("BOSS")
@@ -1133,19 +1446,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let textIndent: CGFloat = kPadding + 22
+        let mainLineY: CGFloat = hasToolInfo ? 24 : 8
 
         let dotLabel = makeSystemLabel("\u{25CF}", size: 14, weight: .regular, color: statusColor)
-        dotLabel.frame.origin = CGPoint(x: kPadding, y: 8)
+        dotLabel.frame.origin = CGPoint(x: kPadding, y: mainLineY)
         view.addSubview(dotLabel)
 
         let bossLabel = makeSystemLabel("Boss (\(s.bossModel))", size: 13, weight: .semibold, color: .labelColor)
-        bossLabel.frame.origin = CGPoint(x: textIndent, y: 8)
+        bossLabel.frame.origin = CGPoint(x: textIndent, y: mainLineY)
         view.addSubview(bossLabel)
 
         let statusLabel = makeSystemLabel(statusText, size: 12, weight: .regular, color: statusColor)
         statusLabel.sizeToFit()
-        statusLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - statusLabel.frame.width, y: 9)
+        statusLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - statusLabel.frame.width, y: mainLineY + 1)
         view.addSubview(statusLabel)
+
+        // Current tool info (third line)
+        if hasToolInfo, let tool = s.currentTool {
+            let toolText: String
+            if tool.summary.isEmpty {
+                toolText = tool.toolName
+            } else {
+                toolText = "\(tool.toolName): \(tool.summary)"
+            }
+            let maxToolWidth = kContentWidth - 22
+            let truncatedTool = truncateToWidth(toolText, maxWidth: maxToolWidth, font: NSFont.systemFont(ofSize: 11))
+            let toolLabel = makeSystemLabel(truncatedTool, size: 11, weight: .regular, color: .tertiaryLabelColor)
+            toolLabel.frame.origin = CGPoint(x: textIndent, y: 6)
+            view.addSubview(toolLabel)
+        }
 
         return view
     }
@@ -1211,8 +1540,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         chevron.frame.origin = CGPoint(x: textIndent + typeLabel.frame.width + 4 + bgFgLabel.frame.width + 4, y: rowHeight - 21)
         view.addSubview(chevron)
 
-        // Elapsed time for running agents (right-aligned on first line)
-        if let elapsed = elapsedString(for: agent) {
+        // Elapsed time / last activity for running agents (right-aligned on first line)
+        if agent.status == "running", let lastAct = agent.lastActivity, !lastAct.isEmpty,
+           let lastActDate = AppDelegate.iso8601.date(from: lastAct) {
+            let secsSinceActivity = Int(Date().timeIntervalSince(lastActDate))
+            if secsSinceActivity > 120 {
+                let staleText = "stale \(formatDuration(secsSinceActivity * 1000))"
+                let staleLabel = makeMonoLabel(staleText, size: 12, weight: .regular, color: .systemOrange)
+                staleLabel.sizeToFit()
+                staleLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - staleLabel.frame.width, y: rowHeight - 22)
+                view.addSubview(staleLabel)
+            } else {
+                let agoText = "\(secsSinceActivity)s ago"
+                let agoLabel = makeMonoLabel(agoText, size: 12, weight: .regular, color: .systemBlue)
+                agoLabel.sizeToFit()
+                agoLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - agoLabel.frame.width, y: rowHeight - 22)
+                view.addSubview(agoLabel)
+            }
+        } else if let elapsed = elapsedString(for: agent) {
             let elapsedLabel = makeMonoLabel(elapsed, size: 12, weight: .regular, color: .systemBlue)
             elapsedLabel.sizeToFit()
             elapsedLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - elapsedLabel.frame.width, y: rowHeight - 22)
@@ -1235,10 +1580,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             view.addSubview(tokenLabel)
         }
 
-        // Description on second line, truncated to available width
+        // Description on second line (show error in red if errored)
         let maxDescWidth = kMenuWidth - kPadding - textIndent - 4 - tokenLabelWidth
-        let descText = truncateToWidth(agent.description, maxWidth: maxDescWidth, font: NSFont.systemFont(ofSize: 12))
-        let descLabel = makeSystemLabel(descText, size: 12, weight: .regular, color: .secondaryLabelColor)
+        let descContent: String
+        let descColor: NSColor
+        if agent.status == "errored", let err = agent.error, !err.isEmpty {
+            descContent = err
+            descColor = .systemRed
+        } else {
+            descContent = agent.description
+            descColor = .secondaryLabelColor
+        }
+        let descText = truncateToWidth(descContent, maxWidth: maxDescWidth, font: NSFont.systemFont(ofSize: 12))
+        let descLabel = makeSystemLabel(descText, size: 12, weight: .regular, color: descColor)
         descLabel.frame.origin = CGPoint(x: textIndent, y: 6)
         view.addSubview(descLabel)
 
@@ -1395,6 +1749,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func toggleApproval() {
+        // Confirm before disabling if there are pending approvals
+        if currentState.approvalEnabled && !currentState.pendingApprovals.isEmpty {
+            statusItem.menu?.cancelTracking()
+            let alert = NSAlert()
+            alert.messageText = "Disable Tool Approval?"
+            alert.informativeText = "There are \(currentState.pendingApprovals.count) pending approval(s). Disabling will cancel them."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Disable")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            if response != .alertFirstButtonReturn {
+                return
+            }
+        }
+
         guard let url = URL(string: "http://127.0.0.1:\(serverPort)/approval/toggle") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1449,6 +1818,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Helpers
 
+    /// Safely convert a JSON number (may be Double-backed NSNumber) to Int
+    func jsonInt(_ value: Any?) -> Int? {
+        if let i = value as? Int { return i }
+        if let d = value as? Double { return Int(d) }
+        return nil
+    }
+
+    func jsonIntDefault(_ value: Any?, _ fallback: Int = 0) -> Int {
+        return jsonInt(value) ?? fallback
+    }
+
     func formatTokenCount(_ tokens: Int) -> String {
         if tokens >= 1000 {
             let k = Double(tokens) / 1000.0
@@ -1493,6 +1873,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         return lo > 0 ? String(str.prefix(lo)) + "…" : "…"
+    }
+
+    func agentModelForType(_ type: String) -> String {
+        switch type.lowercased() {
+        case "advisor": return "opus"
+        case "researcher", "reviewer", "worker": return "sonnet"
+        case "skill-discoverer": return "haiku"
+        default: return "sonnet"
+        }
+    }
+
+    func estimateCost(tokens: Int, model: String) -> Double {
+        let ratePerMillion: Double
+        switch model.lowercased() {
+        case "opus": ratePerMillion = 45.0
+        case "sonnet": ratePerMillion = 9.0
+        case "haiku": ratePerMillion = 0.75
+        default: ratePerMillion = 9.0
+        }
+        return Double(tokens) / 1_000_000.0 * ratePerMillion
+    }
+
+    func estimateSessionCost(_ s: AgentState) -> Double {
+        var agentCost = 0.0
+        for agent in s.agents {
+            if let tokens = agent.totalTokens, tokens > 0 {
+                agentCost += estimateCost(tokens: tokens, model: agentModelForType(agent.subagentType))
+            }
+        }
+        let agentTokens = s.agents.compactMap { $0.totalTokens }.reduce(0, +)
+        let bossTokens = max(0, s.usage.totalTokens - agentTokens)
+        let bossCost = estimateCost(tokens: bossTokens, model: s.bossModel)
+        return agentCost + bossCost
+    }
+
+    func formatCost(_ cost: Double) -> String {
+        if cost < 0.01 { return "<$0.01" }
+        else if cost < 1.0 { return String(format: "~$%.2f", cost) }
+        else { return String(format: "~$%.1f", cost) }
     }
 
     func statusDisplay(_ status: String) -> (String, NSColor) {
