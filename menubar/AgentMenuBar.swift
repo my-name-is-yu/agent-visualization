@@ -1254,16 +1254,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // Cost estimate
-        if s.usage.totalTokens > 0 {
-            let cost = estimateSessionCost(s)
-            items.append(CountItem(
-                number: formatCost(cost),
-                label: "Cost",
-                numColor: .systemOrange
-            ))
-        }
-
         // Adaptive sizing: shrink font and spacing when many items
         let fontSize: CGFloat = items.count > 5 ? 12 : 14
         let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
@@ -1873,45 +1863,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         return lo > 0 ? String(str.prefix(lo)) + "…" : "…"
-    }
-
-    func agentModelForType(_ type: String) -> String {
-        switch type.lowercased() {
-        case "advisor": return "opus"
-        case "researcher", "reviewer", "worker": return "sonnet"
-        case "skill-discoverer": return "haiku"
-        default: return "sonnet"
-        }
-    }
-
-    func estimateCost(tokens: Int, model: String) -> Double {
-        let ratePerMillion: Double
-        switch model.lowercased() {
-        case "opus": ratePerMillion = 45.0
-        case "sonnet": ratePerMillion = 9.0
-        case "haiku": ratePerMillion = 0.75
-        default: ratePerMillion = 9.0
-        }
-        return Double(tokens) / 1_000_000.0 * ratePerMillion
-    }
-
-    func estimateSessionCost(_ s: AgentState) -> Double {
-        var agentCost = 0.0
-        for agent in s.agents {
-            if let tokens = agent.totalTokens, tokens > 0 {
-                agentCost += estimateCost(tokens: tokens, model: agentModelForType(agent.subagentType))
-            }
-        }
-        let agentTokens = s.agents.compactMap { $0.totalTokens }.reduce(0, +)
-        let bossTokens = max(0, s.usage.totalTokens - agentTokens)
-        let bossCost = estimateCost(tokens: bossTokens, model: s.bossModel)
-        return agentCost + bossCost
-    }
-
-    func formatCost(_ cost: Double) -> String {
-        if cost < 0.01 { return "<$0.01" }
-        else if cost < 1.0 { return String(format: "~$%.2f", cost) }
-        else { return String(format: "~$%.1f", cost) }
     }
 
     func statusDisplay(_ status: String) -> (String, NSColor) {
