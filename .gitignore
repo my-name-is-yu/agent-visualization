@@ -1,4 +1,5 @@
 node_modules/
+dist/
 menubar/AgentMenuBar
 menubar/AgentMenuBar.app/Contents/MacOS/AgentMenuBar
 menubar/AgentMenuBar.app/Contents/_CodeSignature/

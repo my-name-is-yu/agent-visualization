@@ -26,18 +26,23 @@ echo "  Home: $HOME"
 echo ""
 
 # 1. Create directories
-echo "[1/11] Creating directories..."
+echo "[1/12] Creating directories..."
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$LOG_DIR"
 mkdir -p "$LAUNCH_DIR"
 
 # 2. Install npm dependencies
-echo "[2/11] Installing npm dependencies..."
-cd "$SCRIPT_DIR" && npm install --production 2>&1
+echo "[2/12] Installing npm dependencies..."
+cd "$SCRIPT_DIR" && npm install 2>&1
 echo "      Done."
 
-# 3. Compile Swift menu bar app
-echo "[3/11] Compiling menu bar app..."
+# 3. Build TypeScript
+echo "[3/12] Building TypeScript..."
+cd "$SCRIPT_DIR" && npm run build 2>&1
+echo "      Done."
+
+# 4. Compile Swift menu bar app
+echo "[4/12] Compiling menu bar app..."
 swiftc \
   "$SCRIPT_DIR/menubar/AgentMenuBar.swift" \
   -o "$APP_BUNDLE/Contents/MacOS/AgentMenuBar" \
@@ -46,7 +51,7 @@ swiftc \
 echo "      Done."
 
 # 4. Copy resources into app bundle
-echo "[4/11] Copying resources..."
+echo "[5/12] Copying resources..."
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 if [ ! -f "$SCRIPT_DIR/Icon.png" ]; then
     echo "Error: Icon.png not found in $SCRIPT_DIR"
@@ -56,17 +61,17 @@ cp "$SCRIPT_DIR/Icon.png" "$APP_BUNDLE/Contents/Resources/Icon.png"
 echo "      Done."
 
 # 5. Strip quarantine attributes
-echo "[5/11] Stripping quarantine attributes..."
+echo "[6/12] Stripping quarantine attributes..."
 xattr -cr "$APP_BUNDLE"
 echo "      Done."
 
 # 6. Ad-hoc code sign (required for notifications)
-echo "[6/11] Code signing..."
+echo "[7/12] Code signing..."
 codesign --force --sign - "$APP_BUNDLE"
 echo "      Done."
 
 # 7. Generate LaunchAgent plist files
-echo "[7/11] Generating LaunchAgent plists..."
+echo "[8/12] Generating LaunchAgent plists..."
 
 cat > "$LAUNCH_DIR/com.agent-visualization.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -78,7 +83,7 @@ cat > "$LAUNCH_DIR/com.agent-visualization.plist" <<PLIST
   <key>ProgramArguments</key>
   <array>
     <string>$NODE_PATH</string>
-    <string>$SCRIPT_DIR/server.js</string>
+    <string>$SCRIPT_DIR/dist/server.js</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$SCRIPT_DIR</string>
@@ -124,22 +129,22 @@ PLIST
 echo "      Done."
 
 # 8. Stop existing services
-echo "[8/11] Stopping existing services..."
+echo "[9/12] Stopping existing services..."
 pkill -f "AgentMenuBar" 2>/dev/null || true
 launchctl unload "$LAUNCH_DIR/com.agent-visualization.plist" 2>/dev/null || true
 launchctl unload "$LAUNCH_DIR/com.agent-visualization.menubar.plist" 2>/dev/null || true
 sleep 1
 
 # 9. Load server
-echo "[9/11] Starting server..."
+echo "[10/12] Starting server..."
 launchctl load "$LAUNCH_DIR/com.agent-visualization.plist"
 
 # 10. Load menu bar app
-echo "[10/11] Starting menu bar app..."
+echo "[11/12] Starting menu bar app..."
 launchctl load "$LAUNCH_DIR/com.agent-visualization.menubar.plist"
 
 # 11. Verify
-echo "[11/11] Verifying..."
+echo "[12/12] Verifying..."
 sleep 2
 if curl -s http://localhost:1217/state > /dev/null 2>&1; then
   echo "      Server: OK"

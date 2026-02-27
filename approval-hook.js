@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = parseInt(process.env.AGENT_VIZ_PORT || '1217', 10);
-const POLL_INTERVAL_MS = 500;
+const LONG_POLL_WAIT_SEC = 30;
 const TIMEOUT_MS = 60_000;
 
 // Load allow-list from settings.json once at startup
@@ -147,12 +147,14 @@ function pollForDecision(requestId) {
       process.exit(0);
     }
 
+    // Long-poll: server holds connection until decision arrives or wait timeout
+    const waitSec = Math.max(1, Math.min(LONG_POLL_WAIT_SEC, Math.ceil((TIMEOUT_MS - (Date.now() - startTime)) / 1000)));
     const req = http.request({
       hostname: '127.0.0.1',
       port: PORT,
-      path: `/approval/response/${requestId}`,
+      path: `/approval/response/${requestId}?wait=${waitSec}`,
       method: 'GET',
-      timeout: 3000,
+      timeout: (waitSec + 5) * 1000,
     }, (res) => {
       let body = '';
       res.on('data', (chunk) => { body += chunk; });
@@ -161,20 +163,32 @@ function pollForDecision(requestId) {
           const result = JSON.parse(body);
           if (result.status === 'decided') {
             const decision = result.decision === 'deny' ? 'deny' : 'allow';
-            const output = JSON.stringify({ hookSpecificOutput: { permissionDecision: decision } });
+            const reason = decision === 'allow'
+              ? 'Approved via menu bar'
+              : 'Denied via menu bar';
+            const output = JSON.stringify({
+              hookSpecificOutput: {
+                permissionDecision: decision,
+                permissionDecisionReason: reason,
+              },
+            });
             process.stdout.write(output + '\n');
             process.exit(0);
           }
-          // Still pending → poll again
-          setTimeout(poll, POLL_INTERVAL_MS);
+          if (result.status === 'unknown') {
+            // Request expired or server restarted → fail-open
+            process.exit(0);
+          }
+          // Still pending → long-poll again immediately
+          poll();
         } catch (_) {
-          setTimeout(poll, POLL_INTERVAL_MS);
+          setTimeout(poll, 1000);
         }
       });
     });
 
-    req.on('error', () => { setTimeout(poll, POLL_INTERVAL_MS); });
-    req.on('timeout', () => { req.destroy(); setTimeout(poll, POLL_INTERVAL_MS); });
+    req.on('error', () => { setTimeout(poll, 1000); });
+    req.on('timeout', () => { req.destroy(); poll(); });
     req.end();
   }
 

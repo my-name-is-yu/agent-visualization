@@ -1,0 +1,13 @@
+{
+  "port": 1217,
+  "bossModel": "opus",
+  "bossActiveMs": 30000,
+  "autoResetSeconds": 60,
+  "cleanupMinutes": 30,
+  "staleAgentMs": 300000,
+  "maxMessages": 200,
+  "sseKeepAliveMs": 20000,
+  "cleanupIntervalMs": 60000,
+  "approvalDecisionCleanupMs": 300000,
+  "pendingApprovalCleanupMs": 90000
+}

@@ -198,6 +198,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var sseTask: URLSessionDataTask?
     var sseSession: URLSession?
     var sseReconnectTimer: Timer?
+    var sseConnected = false
+    var isFetching = false
     var elapsedRefreshTimer: Timer?
     var lastMenuBuildTime: Date = .distantPast
     var previousPendingCount: Int = 0
@@ -255,7 +257,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu?.minimumWidth = kMenuWidth
         statusItem.menu?.delegate = self
         buildMenu()
-        startPolling()
+        fetchState()
+        startPollingTimer()
         connectSSE()
 
         // Request notification authorization (may fail for non-bundled binaries)
@@ -284,8 +287,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Polling
 
-    func startPolling() {
-        fetchState()
+    func startPollingTimer() {
         timer = Timer.scheduledTimer(withTimeInterval: currentPollInterval, repeats: true) { [weak self] _ in
             self?.fetchState()
         }
@@ -295,7 +297,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSLog("[AgentMenuBar] Polling started on port %d", serverPort)
     }
 
+    func stopPollingTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
     func adjustPollingRate() {
+        guard !sseConnected else { return }
         let newInterval: TimeInterval = currentState.running > 0 ? 5.0 : 30.0
         if newInterval != currentPollInterval {
             currentPollInterval = newInterval
@@ -321,11 +329,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let delegate = SSEDelegate(
             onEvent: { [weak self] in
                 DispatchQueue.main.async {
+                    self?.sseConnected = true
+                    self?.stopPollingTimer()
                     self?.fetchState()
                 }
             },
             onDisconnect: { [weak self] in
                 DispatchQueue.main.async {
+                    self?.sseConnected = false
+                    self?.startPollingTimer()
                     self?.scheduleSSEReconnect()
                 }
             }
@@ -355,6 +367,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func fetchState() {
         guard let url = URL(string: "http://127.0.0.1:\(serverPort)/state") else { return }
+        guard !isFetching else { return }
+        isFetching = true
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 3
@@ -365,6 +379,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let error = error {
                 NSLog("[AgentMenuBar] Fetch error: %@", error.localizedDescription)
                 DispatchQueue.main.async {
+                    self.isFetching = false
                     self.connected = false
                     self.currentState = AgentState()
                     self.updateUI()
@@ -376,6 +391,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 NSLog("[AgentMenuBar] Failed to parse response")
                 DispatchQueue.main.async {
+                    self.isFetching = false
                     self.connected = false
                     self.updateUI()
                 }
@@ -384,6 +400,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             let state = self.parseState(json)
             DispatchQueue.main.async {
+                self.isFetching = false
                 self.connected = true
                 self.checkAndNotify(state)
                 self.currentState = state
