@@ -1,4 +1,4 @@
-import type { AgentRecord, Message, SessionUsage, SessionInfo, TaskInfo, AppState, BossState, ApprovalRecord, ApprovalDecision, CurrentToolInfo, LastSessionSummary } from './types.js';
+import type { AgentRecord, Message, SessionUsage, PerSessionState, TaskInfo, AppState, BossState, ApprovalRecord, ApprovalDecision, CurrentToolInfo, LastSessionSummary } from './types.js';
 import { config } from './config.js';
 import {
   initDb, migrateFromJson,
@@ -34,16 +34,85 @@ export function setApprovalCleanupHandler(handler: (requestId: string, decision:
 
 export function setApprovalEnabled(value: boolean): void {
   approvalEnabled = value;
+  try { saveMeta('approvalEnabled', value ? '1' : '0'); } catch { /* ignore */ }
 }
 
 // Current tool tracking
 export let currentTool: CurrentToolInfo | null = null;
-export function setCurrentTool(tool: CurrentToolInfo | null): void {
+export function setCurrentTool(tool: CurrentToolInfo | null, sessionId?: string): void {
   currentTool = tool;
+  if (sessionId) {
+    const sess = getOrCreateSession(sessionId);
+    sess.currentTool = tool;
+  }
+}
+
+// Menu open tracking (suppresses auto-reset while menu is displayed)
+export let menuIsOpen = false;
+let menuOpenedAt = 0;
+const MENU_OPEN_TTL_MS = 300_000; // 5 minutes — auto-clear if Swift crashes
+
+export function setMenuOpen(open: boolean): void {
+  menuIsOpen = open;
+  menuOpenedAt = open ? Date.now() : 0;
+}
+
+/**
+ * Touch all running agents in a session to prevent stale detection.
+ * Called on every hook event so that sub-tool activity keeps parent agents alive.
+ */
+export function touchRunningAgents(sessionId: string): void {
+  const now = new Date().toISOString();
+  for (const record of agents.values()) {
+    if (record.session_id === sessionId && record.status === 'running') {
+      record.last_activity = now;
+    }
+  }
 }
 
 // Session timing
 export let sessionStartTime: string | null = null;
+
+// ── Per-session state ────────────────────────────────────────────────────────
+
+interface SessionTimingState {
+  lastEventTime: number;
+  lastHeartbeatTime: number;
+  lastTurnDoneTime: number;
+  sessionStartTime: string | null;
+  currentTool: CurrentToolInfo | null;
+  usage: SessionUsage;
+}
+
+export const sessionStates = new Map<string, SessionTimingState>();
+
+function getOrCreateSession(sessionId: string): SessionTimingState {
+  let s = sessionStates.get(sessionId);
+  if (!s) {
+    s = {
+      lastEventTime: 0,
+      lastHeartbeatTime: 0,
+      lastTurnDoneTime: 0,
+      sessionStartTime: null,
+      currentTool: null,
+      usage: { total_tokens: 0, tool_uses: 0, duration_ms: 0, agent_count: 0 },
+    };
+    sessionStates.set(sessionId, s);
+  }
+  return s;
+}
+
+function findMostActiveSessionId(): string | undefined {
+  let best: string | undefined;
+  let bestTime = 0;
+  for (const [id, state] of sessionStates) {
+    if (state.lastEventTime > bestTime) {
+      bestTime = state.lastEventTime;
+      best = id;
+    }
+  }
+  return best;
+}
 
 // Session history (survives reset)
 export let lastSessionSummary: LastSessionSummary | null = null;
@@ -51,9 +120,39 @@ export let lastSessionSummary: LastSessionSummary | null = null;
 // Timing state
 export let lastEventTime = 0;
 export let lastCompletionTime = 0;
+export let lastHeartbeatTime = 0;
+export let lastTurnDoneTime = 0;
 let autoResetTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function setLastEventTime(t: number): void {
+// New session detection threshold (2 minutes of inactivity = new session)
+const NEW_SESSION_THRESHOLD_MS = 120_000;
+// Done → idle transition threshold
+const DONE_TO_IDLE_MS = 10_000;
+
+/**
+ * Called on heartbeat — signals a new user turn has started.
+ * If there was a long gap, resets session timing.
+ */
+export function onHeartbeat(t: number, sessionId?: string): void {
+  // Per-session timing
+  const sid = sessionId || findMostActiveSessionId();
+  if (sid) {
+    const sess = getOrCreateSession(sid);
+    if (sess.lastHeartbeatTime > 0 && (t - sess.lastHeartbeatTime) > NEW_SESSION_THRESHOLD_MS) {
+      sess.sessionStartTime = null;
+    }
+    sess.lastHeartbeatTime = t;
+    sess.lastEventTime = t;
+    if (!sess.sessionStartTime) {
+      sess.sessionStartTime = new Date(t).toISOString();
+    }
+  }
+
+  // Global timing
+  if (lastHeartbeatTime > 0 && (t - lastHeartbeatTime) > NEW_SESSION_THRESHOLD_MS) {
+    sessionStartTime = null;
+  }
+  lastHeartbeatTime = t;
   lastEventTime = t;
   if (!sessionStartTime) {
     sessionStartTime = new Date(t).toISOString();
@@ -61,9 +160,60 @@ export function setLastEventTime(t: number): void {
   }
 }
 
+/**
+ * Called on every hook event (tool use). Keeps lastEventTime fresh
+ * and sets sessionStartTime on first event.
+ */
+export function setLastEventTime(t: number, sessionId?: string): void {
+  lastEventTime = t;
+  if (sessionId) {
+    const sess = getOrCreateSession(sessionId);
+    sess.lastEventTime = t;
+    if (!sess.sessionStartTime) {
+      sess.sessionStartTime = new Date(t).toISOString();
+    }
+  }
+  if (!sessionStartTime) {
+    sessionStartTime = new Date(t).toISOString();
+    try { saveMeta('sessionStartTime', sessionStartTime); } catch { /* ignore */ }
+  }
+}
+
+export function onTurnDone(t: number, sessionId?: string): void {
+  lastTurnDoneTime = t;
+  const sid = sessionId || findMostActiveSessionId();
+  if (sid) {
+    const sess = getOrCreateSession(sid);
+    sess.lastTurnDoneTime = t;
+  }
+}
+
 export function setLastCompletionTime(t: number): void {
   lastCompletionTime = t;
 }
+
+/**
+ * Add usage stats for a completed agent, updating both global and per-session totals.
+ */
+export function addUsage(sessionId: string, tokens?: number, toolUses?: number, durationMs?: number): void {
+  sessionUsage.agent_count++;
+  if (tokens) sessionUsage.total_tokens += tokens;
+  if (toolUses) sessionUsage.tool_uses += toolUses;
+  if (durationMs) sessionUsage.duration_ms += durationMs;
+  usageDirty = true;
+
+  if (sessionId) {
+    const sess = getOrCreateSession(sessionId);
+    sess.usage.agent_count++;
+    if (tokens) sess.usage.total_tokens += tokens;
+    if (toolUses) sess.usage.tool_uses += toolUses;
+    if (durationMs) sess.usage.duration_ms += durationMs;
+  }
+}
+
+// Dirty tracking for incremental DB sync
+export const dirtyAgentIds = new Set<string>();
+let usageDirty = false;
 
 // SSE clients
 export const sseClients = new Set<Response>();
@@ -71,6 +221,7 @@ export const sseClients = new Set<Response>();
 // ── SQLite persistence helpers ───────────────────────────────────────────────
 
 export function persistAgent(agent: AgentRecord): void {
+  dirtyAgentIds.add(agent.id);
   try {
     saveAgent(agent);
   } catch (err) {
@@ -150,14 +301,18 @@ export function loadFromDb(): void {
     } catch { /* ignore */ }
   }
 
-  // Restore session start time
-  const savedStartTime = loadMeta('sessionStartTime');
-  if (savedStartTime) sessionStartTime = savedStartTime;
+  // Don't restore sessionStartTime — it resets on first event after server restart
 
   // Restore last session summary
   const savedSummary = loadMeta('lastSessionSummary');
   if (savedSummary) {
     try { lastSessionSummary = JSON.parse(savedSummary); } catch { /* ignore */ }
+  }
+
+  // Restore approval enabled state
+  const savedApprovalEnabled = loadMeta('approvalEnabled');
+  if (savedApprovalEnabled != null) {
+    approvalEnabled = savedApprovalEnabled === '1';
   }
 
   console.log(`[state] Loaded from DB: ${agents.size} agents, ${messages.length} messages`);
@@ -190,15 +345,30 @@ export function addMessage(from_id: string, to_id: string, type: string): void {
 
 // ── SSE Notification ──────────────────────────────────────────────────────────
 
+let dbSyncFailCount = 0;
+
 export function notifyClients(): void {
-  // Persist all agents and session usage to SQLite.
-  // Routes mutate agent records in-place then call notifyClients(), so this
-  // is the single sync point that catches all in-place mutations.
+  // Persist only dirty agents and session usage to SQLite.
   try {
-    syncAllAgents(Array.from(agents.values()));
-    persistSessionUsage();
+    if (dirtyAgentIds.size > 0) {
+      const dirtyAgents = Array.from(dirtyAgentIds)
+        .map(id => agents.get(id))
+        .filter((a): a is AgentRecord => a != null);
+      if (dirtyAgents.length > 0) {
+        syncAllAgents(dirtyAgents);
+      }
+      dirtyAgentIds.clear();
+    }
+    if (usageDirty) {
+      persistSessionUsage();
+      usageDirty = false;
+    }
+    dbSyncFailCount = 0;
   } catch (err) {
-    console.error('[state] Failed to sync to DB:', err);
+    dbSyncFailCount++;
+    if (dbSyncFailCount <= 3 || dbSyncFailCount % 10 === 0) {
+      console.error(`[state] Failed to sync to DB (count: ${dbSyncFailCount}):`, err);
+    }
   }
 
   const data = JSON.stringify({ type: 'state-changed', timestamp: Date.now() });
@@ -245,46 +415,120 @@ function buildTasks(): TaskInfo[] {
   }));
 }
 
-function buildSessions(): SessionInfo[] {
-  const map = new Map<string, SessionInfo>();
+interface AgentCounts {
+  agent_count: number;
+  running: number;
+  completed: number;
+  errored: number;
+}
+
+/**
+ * Single-pass agent counting: returns global summary + per-session counts.
+ */
+function countAgents(): {
+  summary: { total: number; running: number; completed: number; errored: number };
+  perSession: Map<string, AgentCounts>;
+} {
+  const summary = { total: 0, running: 0, completed: 0, errored: 0 };
+  const perSession = new Map<string, AgentCounts>();
+
   for (const a of agents.values()) {
+    summary.total++;
+    if (a.status === 'running') summary.running++;
+    else if (a.status === 'completed') summary.completed++;
+    else if (a.status === 'errored') summary.errored++;
+
     const sid = a.session_id || 'unknown';
-    if (!map.has(sid)) {
-      map.set(sid, { session_id: sid, agent_count: 0, running: 0, completed: 0, errored: 0 });
+    let c = perSession.get(sid);
+    if (!c) {
+      c = { agent_count: 0, running: 0, completed: 0, errored: 0 };
+      perSession.set(sid, c);
     }
-    const s = map.get(sid)!;
-    s.agent_count++;
-    if (a.status === 'running') s.running++;
-    else if (a.status === 'completed') s.completed++;
-    else if (a.status === 'errored') s.errored++;
+    c.agent_count++;
+    if (a.status === 'running') c.running++;
+    else if (a.status === 'completed') c.completed++;
+    else if (a.status === 'errored') c.errored++;
   }
-  return Array.from(map.values());
+
+  return { summary, perSession };
+}
+
+function isTurnInProgress(heartbeat: number, turnDone: number, lastActivity: number, now: number): boolean {
+  const lastKnownActivity = Math.max(heartbeat, lastActivity);
+  const turnAbandoned = lastKnownActivity > 0 && (now - lastKnownActivity) > config.turnStaleMs;
+  return heartbeat > 0
+    && heartbeat > turnDone
+    && !turnAbandoned;
+}
+
+function buildSessions(agentCounts: Map<string, AgentCounts>): PerSessionState[] {
+  // Merge all known session IDs (from agents and timing states)
+  const allSessionIds = new Set([...agentCounts.keys(), ...sessionStates.keys()]);
+  const now = Date.now();
+  const result: PerSessionState[] = [];
+
+  for (const sid of allSessionIds) {
+    const timing = sessionStates.get(sid);
+    const counts = agentCounts.get(sid) || { agent_count: 0, running: 0, completed: 0, errored: 0 };
+
+    // Compute per-session boss status
+    const hasRunning = counts.running > 0;
+    const turnInProgress = timing != null
+      && isTurnInProgress(timing.lastHeartbeatTime, timing.lastTurnDoneTime, timing.lastEventTime, now);
+    const heartbeatStale = timing != null
+      && timing.lastHeartbeatTime > 0
+      && (now - timing.lastHeartbeatTime) > DONE_TO_IDLE_MS;
+
+    let status: PerSessionState['status'];
+    if (hasRunning || turnInProgress) {
+      status = 'running';
+    } else if (timing?.sessionStartTime && !heartbeatStale) {
+      status = 'done';
+    } else {
+      status = 'idle';
+    }
+
+    result.push({
+      session_id: sid,
+      status,
+      currentTool: status === 'running' ? (timing?.currentTool || null) : null,
+      sessionStartTime: status === 'idle' ? null : (timing?.sessionStartTime || null),
+      usage: timing?.usage || { total_tokens: 0, tool_uses: 0, duration_ms: 0, agent_count: 0 },
+      ...counts,
+    });
+  }
+
+  return result;
 }
 
 export function buildState(): AppState {
-  const allAgents = Array.from(agents.values());
-  const summary = {
-    total: allAgents.length,
-    running: allAgents.filter((a) => a.status === 'running').length,
-    completed: allAgents.filter((a) => a.status === 'completed').length,
-    errored: allAgents.filter((a) => a.status === 'errored').length,
-  };
+  const { summary, perSession } = countAgents();
 
-  const list = allAgents
-    .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())
+  const list = Array.from(agents.values())
+    .sort((a, b) => b.started_at > a.started_at ? 1 : b.started_at < a.started_at ? -1 : 0)
     .slice(0, 200);
 
-  const hasRunningAgents = summary.running > 0;
-  const bossActive = (Date.now() - lastEventTime) < config.bossActiveMs;
-  let bossStatus: BossState['status'];
-  if (hasRunningAgents) {
-    bossStatus = 'running';
-  } else if (bossActive) {
-    bossStatus = 'running';
-  } else if (allAgents.length > 0) {
-    bossStatus = 'done';
-  } else {
-    bossStatus = 'idle';
+  const sessions = buildSessions(perSession);
+
+  // Derive global bossStatus: per-session first, then fall back to global timing
+  let bossStatus: BossState['status'] = 'idle';
+  for (const s of sessions) {
+    if (s.status === 'running') { bossStatus = 'running'; break; }
+    if (s.status === 'done') bossStatus = 'done';
+  }
+  // Fallback to global timing (for backward compat when no per-session timing exists)
+  if (bossStatus === 'idle') {
+    const hasRunningAgents = summary.running > 0;
+    const now = Date.now();
+    const turnInProgress = isTurnInProgress(lastHeartbeatTime, lastTurnDoneTime, lastEventTime, now);
+    const heartbeatStale = lastHeartbeatTime > 0
+      && (now - lastHeartbeatTime) > DONE_TO_IDLE_MS;
+
+    if (hasRunningAgents || turnInProgress) {
+      bossStatus = 'running';
+    } else if (sessionStartTime && !heartbeatStale) {
+      bossStatus = 'done';
+    }
   }
 
   return {
@@ -294,21 +538,21 @@ export function buildState(): AppState {
     agents: list,
     messages: messages.slice(),
     tasks: buildTasks(),
-    sessions: buildSessions(),
+    sessions,
     usage: { ...sessionUsage, usage_available: sessionUsage.total_tokens > 0 },
     approval: {
       enabled: approvalEnabled,
       pending: [...pendingApprovals.values()],
     },
     currentTool: bossStatus === 'running' ? currentTool : null,
-    sessionStartTime,
+    sessionStartTime: bossStatus === 'idle' ? null : sessionStartTime,
     lastSessionSummary,
   };
 }
 
 // ── Reset ─────────────────────────────────────────────────────────────────────
 
-export function resetState(): void {
+export function resetState(silent: boolean = false): void {
   // Snapshot current session before clearing
   if (agents.size > 0 || sessionUsage.total_tokens > 0) {
     lastSessionSummary = {
@@ -330,10 +574,21 @@ export function resetState(): void {
   sessionUsage.agent_count = 0;
   lastEventTime = 0;
   lastCompletionTime = 0;
+  lastHeartbeatTime = 0;
+  lastTurnDoneTime = 0;
 
   // Also clear session-specific state
   currentTool = null;
   sessionStartTime = null;
+  sessionStates.clear();
+  dirtyAgentIds.clear();
+
+  // Clear approval state and resolve any waiting long-poll requests
+  for (const [id] of pendingApprovals) {
+    if (onApprovalCleanup) onApprovalCleanup(id, 'allow');
+  }
+  pendingApprovals.clear();
+  approvalDecisions.clear();
 
   // Clear SQLite tables
   try {
@@ -342,7 +597,9 @@ export function resetState(): void {
     console.error('[state] Failed to clear DB tables:', err);
   }
 
-  notifyClients();
+  if (!silent) {
+    notifyClients();
+  }
   console.log('[resetState] State cleared (memory + DB)');
 }
 
@@ -363,6 +620,16 @@ export function scheduleAutoReset(): void {
         if (record.status === 'running') {
           console.log('[autoReset] Cancelled — new agent started');
           autoResetTimer = null;
+          return;
+        }
+      }
+      if (menuIsOpen) {
+        // Auto-clear if menu has been "open" for too long (e.g. Swift crashed)
+        if (menuOpenedAt > 0 && (Date.now() - menuOpenedAt) > MENU_OPEN_TTL_MS) {
+          menuIsOpen = false;
+          menuOpenedAt = 0;
+        } else {
+          scheduleAutoReset();
           return;
         }
       }
@@ -407,8 +674,9 @@ export function runCleanup(): void {
   let markedStale = false;
   for (const record of agents.values()) {
     if (record.status !== 'running') continue;
-    const lastAct = new Date(record.last_activity || record.started_at);
-    if (now - lastAct.getTime() > config.staleAgentMs) {
+    const lastActMs = Date.parse(record.last_activity || record.started_at);
+    if (isNaN(lastActMs)) continue;
+    if (now - lastActMs > config.staleAgentMs) {
       record.status = 'errored';
       record.error = 'Agent appears stale (no activity for 5+ minutes)';
       record.ended_at = new Date().toISOString();
@@ -425,16 +693,28 @@ export function runCleanup(): void {
   // Remove old completed/errored agents
   for (const [key, record] of agents.entries()) {
     if (record.status === 'running') continue;
-    const endedAt = record.ended_at ? new Date(record.ended_at).getTime() : 0;
-    if (now - endedAt > config.cleanupMs) {
+    const endedAtMs = record.ended_at ? Date.parse(record.ended_at) : 0;
+    if (isNaN(endedAtMs)) continue;
+    if (now - endedAtMs > config.cleanupMs) {
       agents.delete(key);
       removeAgentFromDb(key);
     }
   }
 
+  // Evict stale sessions (no activity for cleanupMs)
+  for (const [sid, state] of sessionStates) {
+    if (state.lastEventTime > 0 && (now - state.lastEventTime) > config.cleanupMs) {
+      sessionStates.delete(sid);
+    }
+  }
+
   // Trim old messages
   const cutoff = new Date(now - config.cleanupMs).toISOString();
-  while (messages.length > 0 && messages[0].timestamp < cutoff) {
-    messages.shift();
+  let trimCount = 0;
+  while (trimCount < messages.length && messages[trimCount].timestamp < cutoff) {
+    trimCount++;
+  }
+  if (trimCount > 0) {
+    messages.splice(0, trimCount);
   }
 }

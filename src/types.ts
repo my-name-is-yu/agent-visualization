@@ -22,7 +22,6 @@ export interface AgentRecord {
   duration_ms: number | null;
   error: string | null;
   output_preview: string | null;
-  output_file: string | null;
   parent_id: string;
   usage: AgentUsage | null;
   agentId?: string;
@@ -47,8 +46,12 @@ export interface SessionUsage {
   agent_count: number;
 }
 
-export interface SessionInfo {
+export interface PerSessionState {
   session_id: string;
+  status: 'running' | 'done' | 'idle';
+  currentTool: CurrentToolInfo | null;
+  sessionStartTime: string | null;
+  usage: SessionUsage;
   agent_count: number;
   running: number;
   completed: number;
@@ -114,7 +117,7 @@ export interface AppState {
   agents: AgentRecord[];
   messages: Message[];
   tasks: TaskInfo[];
-  sessions: SessionInfo[];
+  sessions: PerSessionState[];
   usage: SessionUsage & { usage_available: boolean };
   approval: {
     enabled: boolean;

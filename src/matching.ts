@@ -47,16 +47,7 @@ export function findTaskOutputAgent(
     }
   }
 
-  // Fallback: oldest running background agent in same session
-  let oldest: AgentRecord | null = null;
-  for (const record of agents.values()) {
-    if (record.status === 'running' && record.background && record.session_id === sessionId) {
-      if (!oldest || new Date(record.started_at) < new Date(oldest.started_at)) {
-        oldest = record;
-      }
-    }
-  }
-  return oldest;
+  return null;
 }
 
 /**
@@ -72,7 +63,7 @@ export function findDeepestRunningAgent(
     if (record.id === excludeKey) continue;
     if (record.session_id !== sessionId) continue;
     if (record.status !== 'running') continue;
-    if (!best || new Date(record.started_at) > new Date(best.started_at)) {
+    if (!best || record.started_at > best.started_at) {
       best = record;
     }
   }

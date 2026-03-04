@@ -3,7 +3,7 @@ import type { AgentRecord, Message } from '../types.js';
 export const samplePreEvent = {
   session_id: 'session-abc',
   hook_phase: 'pre' as const,
-  tool_name: 'Task',
+  tool_name: 'Agent',
   tool_use_id: 'tu_001',
   tool_input: {
     description: 'Research auth module',
@@ -16,7 +16,7 @@ export const samplePreEvent = {
 export const samplePostEvent = {
   session_id: 'session-abc',
   hook_phase: 'post' as const,
-  tool_name: 'Task',
+  tool_name: 'Agent',
   tool_use_id: 'tu_001',
   tool_input: {
     description: 'Research auth module',
@@ -29,7 +29,7 @@ export const samplePostEvent = {
 export const samplePostEventCompleted = {
   session_id: 'session-abc',
   hook_phase: 'post' as const,
-  tool_name: 'Task',
+  tool_name: 'Agent',
   tool_use_id: 'tu_002',
   tool_input: {
     description: 'Fix login bug',
@@ -74,7 +74,6 @@ export function makeAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
     duration_ms: null,
     error: null,
     output_preview: null,
-    output_file: null,
     parent_id: '__user__',
     usage: null,
     ...overrides,

@@ -68,7 +68,7 @@ vi.mock('./db.js', async () => {
         started_at: agent.started_at, last_activity: agent.last_activity,
         ended_at: agent.ended_at, duration_ms: agent.duration_ms,
         error: agent.error, output_preview: agent.output_preview,
-        output_file: agent.output_file, parent_id: agent.parent_id,
+        output_file: null, parent_id: agent.parent_id,
         usage_tokens: agent.usage?.total_tokens ?? null,
         usage_tool_uses: agent.usage?.tool_uses ?? null,
         usage_duration_ms: agent.usage?.duration_ms ?? null,
@@ -88,7 +88,7 @@ vi.mock('./db.js', async () => {
         started_at: row.started_at, last_activity: row.last_activity,
         ended_at: row.ended_at, duration_ms: row.duration_ms,
         error: row.error, output_preview: row.output_preview,
-        output_file: row.output_file, parent_id: row.parent_id,
+        output_file: row.output_file as string | null, parent_id: row.parent_id,
         usage: row.usage_tokens != null ? {
           total_tokens: row.usage_tokens || 0,
           tool_uses: row.usage_tool_uses || 0,
@@ -112,7 +112,7 @@ vi.mock('./db.js', async () => {
             started_at: a.started_at, last_activity: a.last_activity,
             ended_at: a.ended_at, duration_ms: a.duration_ms,
             error: a.error, output_preview: a.output_preview,
-            output_file: a.output_file, parent_id: a.parent_id,
+            output_file: null, parent_id: a.parent_id,
             usage_tokens: a.usage?.total_tokens ?? null,
             usage_tool_uses: a.usage?.tool_uses ?? null,
             usage_duration_ms: a.usage?.duration_ms ?? null,
@@ -158,8 +158,11 @@ vi.mock('./db.js', async () => {
 // Import AFTER mock setup
 import {
   agents, messages, sessionUsage, addMessage,
-  buildState, resetState, initState,
+  buildState, resetState, initState, setLastEventTime, onHeartbeat, onTurnDone,
+  setCurrentTool, addUsage, sessionStates,
 } from './state.js';
+// Re-import as namespace to access live bindings for mutable exports
+import * as stateModule from './state.js';
 import { makeAgent } from './__fixtures__/events.js';
 
 describe('state management', () => {
@@ -197,6 +200,8 @@ describe('state management', () => {
 
     it('sets boss status to done when all agents finished', () => {
       agents.set('a1', makeAgent({ id: 'a1', status: 'completed' }));
+      // Simulate that a session was active (events occurred)
+      setLastEventTime(Date.now() - 60_000); // last event 60s ago (beyond bossActiveMs)
       const state = buildState();
       expect(state.boss.status).toBe('done');
     });
@@ -254,6 +259,103 @@ describe('state management', () => {
     });
   });
 
+  describe('onHeartbeat session detection', () => {
+    it('resets sessionStartTime when heartbeat gap exceeds threshold', () => {
+      const t1 = Date.now() - 300_000; // 5 minutes ago
+      onHeartbeat(t1);
+      // Internal sessionStartTime is set (buildState may return null if idle)
+      expect(stateModule.sessionStartTime).toBeTruthy();
+      const firstStart = stateModule.sessionStartTime;
+
+      // Simulate hook event updating lastEventTime (like Bash pre-hook)
+      setLastEventTime(Date.now());
+
+      // New heartbeat after gap — should detect new session
+      const t2 = Date.now();
+      onHeartbeat(t2);
+      expect(stateModule.sessionStartTime).toBeTruthy();
+      // sessionStartTime should be reset to new time, not the old one
+      expect(stateModule.sessionStartTime).not.toBe(firstStart);
+    });
+
+    it('keeps sessionStartTime when heartbeats are close together', () => {
+      const t1 = Date.now() - 10_000; // 10 seconds ago
+      onHeartbeat(t1);
+      const state1 = buildState();
+      const firstStart = state1.sessionStartTime;
+
+      // Another heartbeat 10s later — same session
+      onHeartbeat(Date.now());
+      const state2 = buildState();
+      expect(state2.sessionStartTime).toBe(firstStart);
+    });
+  });
+
+  describe('turn-done status transitions', () => {
+    it('transitions to done immediately after turn-done', () => {
+      const now = Date.now();
+      onHeartbeat(now - 5000);
+      setLastEventTime(now - 1000);
+      // Before turn-done: still running (recent activity, heartbeat > turnDone)
+      expect(buildState().boss.status).toBe('running');
+
+      // Send turn-done
+      onTurnDone(now);
+      // Now should be done (heartbeat < turnDone, session exists, heartbeat not stale)
+      expect(buildState().boss.status).toBe('done');
+    });
+
+    it('stays running during long thinking (no events for 30s+ but within turnStaleMs)', () => {
+      const now = Date.now();
+      onHeartbeat(now - 5000);
+      // Last event was 31s ago — beyond bossActiveMs (30s) but within turnStaleMs (10min)
+      setLastEventTime(now - 31_000);
+      // No turn-done sent; turn is NOT abandoned → turnInProgress is true → running
+      expect(buildState().boss.status).toBe('running');
+    });
+
+    it('falls back to done after turnStaleMs inactivity without turn-done', () => {
+      const now = Date.now();
+      onHeartbeat(now - 700_000); // 11+ min ago
+      // Last event was 11+ min ago — beyond turnStaleMs (10min)
+      setLastEventTime(now - 700_000);
+      // No turn-done sent, but turn is abandoned → turnInProgress is false
+      // sessionStartTime set, heartbeat not stale (>10s doesn't apply since it's turn-abandoned) → done
+      // Actually heartbeat IS stale (>10s) → idle
+      expect(buildState().boss.status).toBe('idle');
+    });
+
+    it('returns null sessionStartTime when idle', () => {
+      const now = Date.now();
+      onHeartbeat(now - 15_000); // 15s ago — stale
+      setLastEventTime(now - 15_000);
+      onTurnDone(now - 14_000);
+      // Should be idle
+      const state = buildState();
+      expect(state.boss.status).toBe('idle');
+      expect(state.sessionStartTime).toBeNull();
+    });
+
+    it('transitions to idle when heartbeat is stale (>10s)', () => {
+      const now = Date.now();
+      onHeartbeat(now - 15_000); // 15s ago — beyond 10s threshold
+      setLastEventTime(now - 15_000);
+      onTurnDone(now - 14_000);
+      // heartbeatStale = true → idle
+      expect(buildState().boss.status).toBe('idle');
+    });
+
+    it('stays running when agents are running even after turn-done', () => {
+      const now = Date.now();
+      onHeartbeat(now - 5000);
+      setLastEventTime(now - 5000);
+      onTurnDone(now);
+      agents.set('a1', makeAgent({ id: 'a1', status: 'running' }));
+      // hasRunningAgents = true → still running
+      expect(buildState().boss.status).toBe('running');
+    });
+  });
+
   describe('sessions', () => {
     it('groups agents by session_id', () => {
       agents.set('a1', makeAgent({ id: 'a1', session_id: 'sess-1', status: 'running' }));
@@ -266,6 +368,97 @@ describe('state management', () => {
       expect(sess1?.agent_count).toBe(2);
       expect(sess1?.running).toBe(1);
       expect(sess1?.completed).toBe(1);
+    });
+  });
+
+  describe('per-session state', () => {
+    it('computes per-session bossStatus independently', () => {
+      const now = Date.now();
+      // Session 1: running (has heartbeat, recent activity, no turn-done)
+      onHeartbeat(now - 1000, 'sess-1');
+      setLastEventTime(now - 500, 'sess-1');
+      // Session 2: idle (heartbeat stale)
+      onHeartbeat(now - 20_000, 'sess-2');
+      setLastEventTime(now - 20_000, 'sess-2');
+      onTurnDone(now - 19_000, 'sess-2');
+
+      const state = buildState();
+      const s1 = state.sessions.find(s => s.session_id === 'sess-1');
+      const s2 = state.sessions.find(s => s.session_id === 'sess-2');
+
+      expect(s1?.status).toBe('running');
+      expect(s2?.status).toBe('idle');
+      // Global should be running (most active)
+      expect(state.boss.status).toBe('running');
+    });
+
+    it('tracks per-session currentTool', () => {
+      const now = Date.now();
+      onHeartbeat(now - 1000, 'sess-1');
+      setLastEventTime(now - 500, 'sess-1');
+      setCurrentTool({ toolName: 'Read', summary: 'file.ts', timestamp: new Date().toISOString() }, 'sess-1');
+
+      onHeartbeat(now - 1000, 'sess-2');
+      setLastEventTime(now - 500, 'sess-2');
+      setCurrentTool({ toolName: 'Bash', summary: 'npm test', timestamp: new Date().toISOString() }, 'sess-2');
+
+      const state = buildState();
+      const s1 = state.sessions.find(s => s.session_id === 'sess-1');
+      const s2 = state.sessions.find(s => s.session_id === 'sess-2');
+
+      expect(s1?.currentTool?.toolName).toBe('Read');
+      expect(s2?.currentTool?.toolName).toBe('Bash');
+    });
+
+    it('tracks per-session usage via addUsage', () => {
+      addUsage('sess-1', 5000, 10, 30000);
+      addUsage('sess-2', 8000, 20, 60000);
+      addUsage('sess-1', 3000, 5, 15000);
+
+      const state = buildState();
+      // Per-session usage comes from sessionStates
+      const s1 = state.sessions.find(s => s.session_id === 'sess-1');
+      const s2 = state.sessions.find(s => s.session_id === 'sess-2');
+
+      expect(s1?.usage.total_tokens).toBe(8000);
+      expect(s1?.usage.agent_count).toBe(2);
+      expect(s2?.usage.total_tokens).toBe(8000);
+      expect(s2?.usage.agent_count).toBe(1);
+
+      // Global usage is the sum
+      expect(state.usage.total_tokens).toBe(16000);
+      expect(state.usage.agent_count).toBe(3);
+    });
+
+    it('tracks per-session sessionStartTime', () => {
+      const now = Date.now();
+      onHeartbeat(now - 5000, 'sess-1');
+      onHeartbeat(now - 2000, 'sess-2');
+
+      const state = buildState();
+      const s1 = state.sessions.find(s => s.session_id === 'sess-1');
+      const s2 = state.sessions.find(s => s.session_id === 'sess-2');
+
+      expect(s1?.sessionStartTime).toBeTruthy();
+      expect(s2?.sessionStartTime).toBeTruthy();
+      expect(s1?.sessionStartTime).not.toBe(s2?.sessionStartTime);
+    });
+
+    it('clears sessionStates on resetState', () => {
+      onHeartbeat(Date.now(), 'sess-1');
+      addUsage('sess-1', 1000, 5, 10000);
+      expect(sessionStates.size).toBe(1);
+
+      resetState();
+      expect(sessionStates.size).toBe(0);
+    });
+
+    it('shows session as running when it has running agents', () => {
+      agents.set('a1', makeAgent({ id: 'a1', session_id: 'sess-1', status: 'running' }));
+
+      const state = buildState();
+      const s1 = state.sessions.find(s => s.session_id === 'sess-1');
+      expect(s1?.status).toBe('running');
     });
   });
 });

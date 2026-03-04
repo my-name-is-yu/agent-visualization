@@ -3,10 +3,10 @@ import { HookEventSchema, type AgentRecord } from '../types.js';
 import { makeKey, isError, parseUsage } from '../utils.js';
 import { findDeepestRunningAgent, findTaskOutputAgent } from '../matching.js';
 import {
-  agents, sessionUsage, addMessage, notifyClients, persistAgent,
+  agents, addMessage, notifyClients, persistAgent,
   setLastEventTime, setLastCompletionTime,
   lastCompletionTime, scheduleAutoReset, cancelAutoReset, resetState,
-  setCurrentTool, summarizeToolInput,
+  setCurrentTool, summarizeToolInput, addUsage, touchRunningAgents,
 } from '../state.js';
 
 const router = Router();
@@ -19,14 +19,19 @@ router.post('/event', (req, res) => {
     return;
   }
 
-  setLastEventTime(Date.now());
   const { session_id, hook_phase, tool_name, tool_input, tool_output, is_error: isErr, tool_use_id: bodyToolUseId } = parsed.data;
+  setLastEventTime(Date.now(), session_id);
+
+  // Keep all running agents in this session alive (prevents stale detection)
+  if (session_id) {
+    touchRunningAgents(session_id);
+  }
 
   // Non-agent tool calls — just update lastEventTime
-  if (tool_name !== 'Task' && tool_name !== 'TaskOutput') {
+  if (tool_name !== 'Agent' && tool_name !== 'Task' && tool_name !== 'TaskOutput') {
     if (hook_phase === 'pre' && tool_name) {
       const summary = summarizeToolInput(tool_name, tool_input as Record<string, unknown>);
-      setCurrentTool({ toolName: tool_name, summary, timestamp: new Date().toISOString() });
+      setCurrentTool({ toolName: tool_name, summary, timestamp: new Date().toISOString() }, session_id);
     }
     notifyClients();
     res.json({ ok: true });
@@ -47,7 +52,7 @@ router.post('/event', (req, res) => {
       }
       matchedRecord.last_activity = new Date().toISOString();
       const ended_at = new Date();
-      const errored = isError(isErr, tool_output);
+      const errored = isError(isErr);
       matchedRecord.status = errored ? 'errored' : 'completed';
       matchedRecord.ended_at = ended_at.toISOString();
       matchedRecord.duration_ms = ended_at.getTime() - new Date(matchedRecord.started_at).getTime();
@@ -61,12 +66,7 @@ router.post('/event', (req, res) => {
       if (usage && usage.duration_ms) matchedRecord.duration_ms = usage.duration_ms;
       const to_id = matchedRecord.parent_id || '__user__';
       addMessage(matchedRecord.id, to_id, 'Response');
-      sessionUsage.agent_count++;
-      if (usage) {
-        if (usage.total_tokens) sessionUsage.total_tokens += usage.total_tokens;
-        if (usage.tool_uses) sessionUsage.tool_uses += usage.tool_uses;
-        if (usage.duration_ms) sessionUsage.duration_ms += usage.duration_ms;
-      }
+      addUsage(matchedRecord.session_id, usage?.total_tokens, usage?.tool_uses, usage?.duration_ms);
       persistAgent(matchedRecord);
       scheduleAutoReset();
     }
@@ -88,7 +88,7 @@ router.post('/event', (req, res) => {
     }
     const timeSinceLastCompletion = Date.now() - lastCompletionTime;
     if (!hasRunning && agents.size > 0 && timeSinceLastCompletion > 60_000) {
-      resetState();
+      resetState(true);
     }
 
     const parentAgent = findDeepestRunningAgent(agents, session_id, key);
@@ -110,7 +110,6 @@ router.post('/event', (req, res) => {
       duration_ms: null,
       error: null,
       output_preview: null,
-      output_file: (tool_input as Record<string, unknown>).output_file as string || null,
       parent_id,
       usage: null,
     };
@@ -152,7 +151,6 @@ router.post('/event', (req, res) => {
         duration_ms: null,
         error: null,
         output_preview: null,
-        output_file: null,
         parent_id: '__user__',
         usage: null,
       };
@@ -168,14 +166,12 @@ router.post('/event', (req, res) => {
 
     if (isBgLaunch) {
       if (typeof tool_output === 'string') {
-        const outputFileMatch = tool_output.match(/output_file:\s*(\S+)/);
-        if (outputFileMatch) record.output_file = outputFileMatch[1];
         const agentIdMatch = tool_output.match(/agentId:\s*(\S+)/);
         if (agentIdMatch) record.agentId = agentIdMatch[1];
       }
     } else {
       const ended_at = new Date();
-      const errored = isError(isErr, tool_output);
+      const errored = isError(isErr);
 
       record.status = errored ? 'errored' : 'completed';
       record.ended_at = ended_at.toISOString();
@@ -186,9 +182,6 @@ router.post('/event', (req, res) => {
       record.output_preview = typeof tool_output === 'string'
         ? tool_output.slice(0, 2000) : null;
 
-      const outputFileMatch = typeof tool_output === 'string' && tool_output.match(/output_file:\s*(\S+)/);
-      if (outputFileMatch) record.output_file = outputFileMatch[1];
-
       const usage = parseUsage(tool_output);
       if (usage) record.usage = usage;
       if (record.duration_ms < 1000 && usage && usage.duration_ms) {
@@ -198,12 +191,7 @@ router.post('/event', (req, res) => {
       const to_id = record.parent_id || '__user__';
       addMessage(key, to_id, 'Response');
 
-      sessionUsage.agent_count++;
-      if (usage) {
-        if (usage.total_tokens) sessionUsage.total_tokens += usage.total_tokens;
-        if (usage.tool_uses) sessionUsage.tool_uses += usage.tool_uses;
-        if (usage.duration_ms) sessionUsage.duration_ms += usage.duration_ms;
-      }
+      addUsage(record.session_id, usage?.total_tokens, usage?.tool_uses, usage?.duration_ms);
     }
 
     persistAgent(record);

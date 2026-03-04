@@ -73,39 +73,24 @@ describe('findTaskOutputAgent', () => {
     expect(result).toBe(agent);
   });
 
-  it('falls back to oldest running bg agent in same session', () => {
-    const older = makeAgent({
+  it('returns null when agentId does not match (no fallback)', () => {
+    const agent = makeAgent({
       id: 'key1',
       background: true,
       session_id: 'session-abc',
-      started_at: '2024-01-01T00:00:00Z',
+      agentId: 'different_task',
     });
-    const newer = makeAgent({
-      id: 'key2',
-      background: true,
-      session_id: 'session-abc',
-      started_at: '2024-01-01T01:00:00Z',
-    });
-    agents.set('key1', older);
-    agents.set('key2', newer);
-
-    const result = findTaskOutputAgent(agents, 'nonexistent', 'session-abc');
-    expect(result).toBe(older);
-  });
-
-  it('does not match non-background agents', () => {
-    const agent = makeAgent({ id: 'key1', background: false, session_id: 'session-abc' });
     agents.set('key1', agent);
 
     const result = findTaskOutputAgent(agents, 'nonexistent', 'session-abc');
     expect(result).toBeNull();
   });
 
-  it('does not match agents from different sessions', () => {
-    const agent = makeAgent({ id: 'key1', background: true, session_id: 'other-session' });
+  it('does not match non-background agents', () => {
+    const agent = makeAgent({ id: 'key1', background: false, agentId: 'task_001' });
     agents.set('key1', agent);
 
-    const result = findTaskOutputAgent(agents, 'nonexistent', 'session-abc');
+    const result = findTaskOutputAgent(agents, 'task_001', 'session-abc');
     expect(result).toBeNull();
   });
 });

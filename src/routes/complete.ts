@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { CompleteEventSchema } from '../types.js';
 import { findMatchingAgent } from '../matching.js';
 import {
-  agents, sessionUsage, addMessage, notifyClients, persistAgent,
-  setLastEventTime, setLastCompletionTime, scheduleAutoReset,
+  agents, addMessage, notifyClients, persistAgent,
+  setLastEventTime, setLastCompletionTime, scheduleAutoReset, addUsage,
 } from '../state.js';
 
 const router = Router();
@@ -35,17 +35,17 @@ router.post('/complete', (req, res) => {
     };
     setLastCompletionTime(Date.now());
 
-    sessionUsage.agent_count++;
-    if (tokens) sessionUsage.total_tokens += tokens;
-    if (tool_uses) sessionUsage.tool_uses += tool_uses;
-    if (duration_ms) sessionUsage.duration_ms += duration_ms;
+    addUsage(matchedRecord.session_id, tokens, tool_uses, duration_ms);
 
     const to_id = matchedRecord.parent_id || '__user__';
     addMessage(matchedRecord.id, to_id, 'Response');
     persistAgent(matchedRecord);
     scheduleAutoReset();
-  } else if (description) {
-    console.warn(`[/complete] No matching agent for description="${description}", agent_id=${agent_id}, tool_use_id=${tool_use_id}`);
+  } else {
+    console.warn(`[/complete] No matching agent for description="${description || '(none)'}", agent_id=${agent_id}, tool_use_id=${tool_use_id}`);
+    notifyClients();
+    res.json({ ok: false, reason: 'no_matching_agent' });
+    return;
   }
 
   notifyClients();

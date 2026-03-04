@@ -24,12 +24,6 @@ export function makeKey(session_id: string, description: string): string {
     .slice(0, 12);
 }
 
-export function isError(is_error: boolean | undefined, tool_output: unknown): boolean {
-  if (is_error === true) return true;
-  if (is_error === false) return false;
-  if (typeof tool_output === 'string') {
-    const sample = tool_output.slice(0, 500).toLowerCase();
-    return /\berror[:;\s]|\bfailed\b|\bexception\b|\btraceback\b/.test(sample);
-  }
-  return false;
+export function isError(is_error: boolean | undefined): boolean {
+  return is_error === true;
 }

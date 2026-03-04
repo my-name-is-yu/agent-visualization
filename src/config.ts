@@ -7,6 +7,7 @@ export interface Config {
   bossActiveMs: number;
   autoResetMs: number;
   cleanupMs: number;
+  turnStaleMs: number;
   staleAgentMs: number;
   maxMessages: number;
   sseKeepAliveMs: number;
@@ -23,6 +24,7 @@ interface ConfigFile {
   bossActiveMs?: number;
   autoResetSeconds?: number;
   cleanupMinutes?: number;
+  turnStaleMs?: number;
   staleAgentMs?: number;
   maxMessages?: number;
   sseKeepAliveMs?: number;
@@ -64,11 +66,12 @@ export function loadConfig(): Config {
     bossActiveMs: file.bossActiveMs ?? 30_000,
     autoResetMs: envInt('AGENT_VIZ_AUTO_RESET_SECONDS', file.autoResetSeconds ?? 60) * 1000,
     cleanupMs: envInt('AGENT_VIZ_CLEANUP_MINUTES', file.cleanupMinutes ?? 30) * 60 * 1000,
+    turnStaleMs: file.turnStaleMs ?? 600_000,
     staleAgentMs: file.staleAgentMs ?? 300_000,
     maxMessages: file.maxMessages ?? 200,
     sseKeepAliveMs: file.sseKeepAliveMs ?? 20_000,
     cleanupIntervalMs: file.cleanupIntervalMs ?? 60_000,
-    approvalDecisionCleanupMs: file.approvalDecisionCleanupMs ?? 300_000,
+    approvalDecisionCleanupMs: file.approvalDecisionCleanupMs ?? 600_000,
     pendingApprovalCleanupMs: file.pendingApprovalCleanupMs ?? 90_000,
     dbPath: path.join(home, '.agent-visualization.db'),
     stateFile: envStr('AGENT_VIZ_STATE_FILE', path.join(home, '.agent-visualization-state.json')),

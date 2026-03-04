@@ -57,9 +57,9 @@ function isAlreadyAllowed(toolName, toolInput, allowPatterns) {
   const fullCmd = (toolInput.command || '').trim();
   if (!fullCmd) return false;
 
-  // Split on && || ; to get individual commands in a chain
+  // Split on && || ; | to get individual commands in a chain
   // e.g. "cd /foo && npm test" → ["cd /foo", "npm test"]
-  const parts = fullCmd.split(/\s*(?:&&|\|\||;)\s*/);
+  const parts = fullCmd.split(/\s*(?:&&|\|\||[|;])\s*/);
 
   // ALL parts must be allowed (or be safe navigation)
   return parts.every(part => {
@@ -89,7 +89,7 @@ process.stdin.on('end', () => {
   const toolName = data.tool_name || '';
   const toolInput = data.tool_input || {};
 
-  // Skip if already allowed by settings.json permissions
+  // Skip approval for tools already allowed by settings.json
   if (isAlreadyAllowed(toolName, toolInput, allowPatterns)) {
     process.exit(0);
   }

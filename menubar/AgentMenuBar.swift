@@ -36,12 +36,16 @@ struct SessionUsage {
     var agentCount: Int = 0
 }
 
-struct SessionInfo {
+struct PerSessionState {
     let sessionId: String
-    let agentCount: Int
-    let running: Int
-    let completed: Int
-    let errored: Int
+    var status: String = "idle"
+    var currentTool: CurrentToolInfo? = nil
+    var sessionStartTime: String? = nil
+    var usage: SessionUsage = SessionUsage()
+    var agentCount: Int = 0
+    var running: Int = 0
+    var completed: Int = 0
+    var errored: Int = 0
 }
 
 struct AgentState {
@@ -53,7 +57,7 @@ struct AgentState {
     var bossModel: String = "opus"
     var agents: [AgentInfo] = []
     var usage = SessionUsage()
-    var sessions: [SessionInfo] = []
+    var sessions: [PerSessionState] = []
     var approvalEnabled: Bool = false
     var pendingApprovals: [ApprovalRequest] = []
     var currentTool: CurrentToolInfo? = nil
@@ -229,6 +233,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var previousAgentStatuses: [String: String] = [:]
     var currentPollInterval: TimeInterval = 30.0
     var selectedAgent: AgentInfo?
+    var selectedSession: PerSessionState?
     var menuIsOpen = false
     var iconImage: NSImage?
     var sseTask: URLSessionDataTask?
@@ -239,6 +244,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var elapsedRefreshTimer: Timer?
     var lastMenuBuildTime: Date = .distantPast
     var previousPendingCount: Int = 0
+    var globalKeyMonitor: Any?
+    var isInitialFetch = true
 
     override init() {
         if let envPort = ProcessInfo.processInfo.environment["AGENT_VIZ_PORT"],
@@ -303,7 +310,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Global hotkey: Ctrl+Shift+A to toggle menu
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.modifierFlags.contains([.control, .shift]),
                event.charactersIgnoringModifiers == "a" {
                 DispatchQueue.main.async {
@@ -314,6 +321,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let monitor = globalKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyMonitor = nil
+        }
         disconnectSSE()
     }
 
@@ -350,7 +361,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func adjustPollingRate() {
         guard !sseConnected else { return }
-        let newInterval: TimeInterval = currentState.running > 0 ? 5.0 : 30.0
+        let newInterval: TimeInterval
+        let hasRunning = currentState.sessions.contains { $0.status == "running" }
+        let hasDone = currentState.sessions.contains { $0.status == "done" }
+        if currentState.bossStatus == "running" || hasRunning {
+            newInterval = 1.0
+        } else if currentState.bossStatus == "done" || hasDone {
+            newInterval = 3.0
+        } else {
+            newInterval = 10.0
+        }
         if newInterval != currentPollInterval {
             currentPollInterval = newInterval
             timer?.invalidate()
@@ -448,6 +468,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.isFetching = false
                 self.connected = true
+                self.isInitialFetch = false
                 self.checkAndNotify(state)
                 self.currentState = state
                 self.updateUI()
@@ -545,13 +566,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let sessions = json["sessions"] as? [[String: Any]] {
             state.sessions = sessions.map { s in
-                SessionInfo(
-                    sessionId: s["session_id"] as? String ?? "unknown",
-                    agentCount: jsonIntDefault(s["agent_count"]),
-                    running: jsonIntDefault(s["running"]),
-                    completed: jsonIntDefault(s["completed"]),
-                    errored: jsonIntDefault(s["errored"])
-                )
+                var sess = PerSessionState(sessionId: s["session_id"] as? String ?? "unknown")
+                sess.status = s["status"] as? String ?? "idle"
+                sess.agentCount = jsonIntDefault(s["agent_count"])
+                sess.running = jsonIntDefault(s["running"])
+                sess.completed = jsonIntDefault(s["completed"])
+                sess.errored = jsonIntDefault(s["errored"])
+                if let tool = s["currentTool"] as? [String: Any] {
+                    sess.currentTool = CurrentToolInfo(
+                        toolName: tool["toolName"] as? String ?? "",
+                        summary: tool["summary"] as? String ?? "",
+                        timestamp: tool["timestamp"] as? String ?? ""
+                    )
+                }
+                sess.sessionStartTime = s["sessionStartTime"] as? String
+                if let usage = s["usage"] as? [String: Any] {
+                    sess.usage.totalTokens = jsonIntDefault(usage["total_tokens"])
+                    sess.usage.toolUses = jsonIntDefault(usage["tool_uses"])
+                    sess.usage.durationMs = jsonIntDefault(usage["duration_ms"])
+                    sess.usage.agentCount = jsonIntDefault(usage["agent_count"])
+                }
+                return sess
             }
         }
 
@@ -625,10 +660,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
+        notifyMenuState(open: true)
         buildMenu()
-        if currentState.running > 0 {
+        if currentState.running > 0 || !currentState.pendingApprovals.isEmpty {
             elapsedRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                guard let self = self, self.menuIsOpen, self.currentState.running > 0 else {
+                guard let self = self, self.menuIsOpen, (self.currentState.running > 0 || !self.currentState.pendingApprovals.isEmpty) else {
                     self?.elapsedRefreshTimer?.invalidate()
                     self?.elapsedRefreshTimer = nil
                     return
@@ -640,7 +676,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuDidClose(_ menu: NSMenu) {
         menuIsOpen = false
+        notifyMenuState(open: false)
         selectedAgent = nil  // Reset navigation on close
+        selectedSession = nil
         elapsedRefreshTimer?.invalidate()
         elapsedRefreshTimer = nil
     }
@@ -651,6 +689,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Refresh selectedAgent from latest state
         if let selected = selectedAgent {
             selectedAgent = currentState.agents.first(where: { $0.id == selected.id })
+        }
+        if let selected = selectedSession {
+            selectedSession = currentState.sessions.first(where: { $0.sessionId == selected.sessionId })
         }
         updateMenuBarTitle()
         if menuIsOpen {
@@ -670,8 +711,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let s = currentState
 
+        let runningSessions = s.sessions.filter { $0.status == "running" }.count
         if !s.pendingApprovals.isEmpty {
             button.title = " ⚠ \(s.pendingApprovals.count) pending"
+        } else if s.bossStatus == "running" && runningSessions > 1 {
+            button.title = " running (\(runningSessions))"
         } else if s.bossStatus == "running" {
             button.title = " running"
         } else if s.bossStatus == "done" {
@@ -683,7 +727,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func buildMenu() {
         let now = Date()
-        if menuIsOpen && now.timeIntervalSince(lastMenuBuildTime) < 0.3 { return }
+        if menuIsOpen && now.timeIntervalSince(lastMenuBuildTime) < 0.5 { return }
         lastMenuBuildTime = now
 
         guard let menu = statusItem.menu else { return }
@@ -691,7 +735,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !connected {
             let item = NSMenuItem()
-            item.view = makeErrorView("Server not connected (port \(serverPort))")
+            if isInitialFetch {
+                item.view = makeErrorView("Connecting to server...")
+            } else {
+                item.view = makeErrorView("Server not connected (port \(serverPort))")
+            }
             menu.addItem(item)
             menu.addItem(NSMenuItem.separator())
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -700,6 +748,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let agent = selectedAgent {
             buildDetailMenu(agent, menu: menu)
+        } else if let session = selectedSession {
+            buildSessionDetailMenu(session, menu: menu)
         } else {
             buildListMenu(menu: menu)
         }
@@ -711,10 +761,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let s = currentState
 
         // -- Boss Section --
-        let bossItem = NSMenuItem()
-        bossItem.view = makeBossView(s)
-        menu.addItem(bossItem)
-        menu.addItem(NSMenuItem.separator())
+        let activeSessions = s.sessions.filter { $0.status != "idle" }
+        if activeSessions.count >= 2 {
+            // Multi-session: show one boss row per active session
+            for session in s.sessions.sorted(by: {
+                let order = ["running": 0, "done": 1, "idle": 2]
+                return (order[$0.status] ?? 3) < (order[$1.status] ?? 3)
+            }) {
+                if session.status == "idle" { continue }
+                let item = NSMenuItem()
+                item.view = makeSessionBossRow(session, model: s.bossModel)
+                menu.addItem(item)
+            }
+            menu.addItem(NSMenuItem.separator())
+        } else {
+            // Single session or idle: existing boss row, made clickable
+            let bossItem = NSMenuItem()
+            if let singleSession = activeSessions.first {
+                bossItem.view = makeClickableBossView(s, session: singleSession)
+            } else {
+                bossItem.view = makeBossView(s)
+            }
+            menu.addItem(bossItem)
+            menu.addItem(NSMenuItem.separator())
+        }
 
         // -- Tasks Summary (when 4+ agents/tasks) --
         if s.tasks.count >= 4 || s.agents.count >= 4 {
@@ -768,19 +838,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             let sessionIds = Set(s.agents.map { $0.sessionId })
             if sessionIds.count > 1 {
-                // Group by session
-                for session in s.sessions.sorted(by: { $0.running > $1.running }) {
+                // Multi-session: use PerSessionState cards
+                for session in s.sessions.sorted(by: {
+                    let order = ["running": 0, "done": 1, "idle": 2]
+                    return (order[$0.status] ?? 3) < (order[$1.status] ?? 3)
+                }) {
                     let sessionAgents = s.agents.filter { $0.sessionId == session.sessionId }
-                    if sessionAgents.isEmpty { continue }
+                    if sessionAgents.isEmpty && session.status == "idle" { continue }
 
                     let sessHeader = NSMenuItem()
-                    let shortId = String(session.sessionId.prefix(8))
-                    let runningText = session.running > 0 ? " (\(session.running) running)" : ""
-                    let headerView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 24))
-                    let headerLabel = makeSectionHeader("SESSION \(shortId)\(runningText)")
-                    headerLabel.frame.origin = CGPoint(x: kPadding, y: 6)
-                    headerView.addSubview(headerLabel)
-                    sessHeader.view = headerView
+                    sessHeader.view = makeSessionHeaderView(session)
                     menu.addItem(sessHeader)
 
                     let sorted = sessionAgents.sorted { a, b in
@@ -907,7 +974,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // -- Session ID --
-        let shortSession = String(agent.sessionId.prefix(8))
+        let shortSession = String(agent.sessionId.prefix(12))
         let sessionItem = NSMenuItem()
         let sessionView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 28))
         let sessionLabel = makeSystemLabel("Session: \(shortSession)", size: 12, weight: .regular, color: .tertiaryLabelColor)
@@ -932,6 +999,152 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(logItem)
             menu.addItem(NSMenuItem.separator())
         }
+
+        // -- Quit --
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    // MARK: - Session Detail View
+
+    func buildSessionDetailMenu(_ session: PerSessionState, menu: NSMenu) {
+        // -- Back Button --
+        let backItem = NSMenuItem()
+        let backView = ClickableRow(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 32))
+        backView.onClick = { [weak self] in
+            self?.selectedSession = nil
+            self?.buildMenu()
+        }
+        let backLabel = makeSystemLabel("\u{2190} Back", size: 14, weight: .medium, color: .secondaryLabelColor)
+        backLabel.frame.origin = CGPoint(x: kPadding, y: (32 - backLabel.frame.height) / 2)
+        backView.addSubview(backLabel)
+        backItem.view = backView
+        menu.addItem(backItem)
+        menu.addItem(NSMenuItem.separator())
+
+        // -- Session Header --
+        let s = currentState
+        let shortId = String(session.sessionId.prefix(12))
+        let (_, statusColor) = statusDisplay(session.status)
+
+        let headerHeight: CGFloat = 32
+        let headerView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: headerHeight))
+        let dotLabel = makeSystemLabel("\u{25CF}", size: 14, weight: .regular, color: statusColor)
+        dotLabel.frame.origin = CGPoint(x: kPadding, y: (headerHeight - 16) / 2)
+        headerView.addSubview(dotLabel)
+
+        let titleLabel = makeSystemLabel("Boss (\(s.bossModel))", size: 16, weight: .semibold, color: .labelColor)
+        titleLabel.frame.origin = CGPoint(x: kPadding + 22, y: (headerHeight - 16) / 2)
+        headerView.addSubview(titleLabel)
+
+        let sessionIdLabel = makeSystemLabel(shortId + "…", size: 14, weight: .regular, color: .tertiaryLabelColor)
+        sessionIdLabel.sizeToFit()
+        sessionIdLabel.frame.origin = CGPoint(x: kPadding + 22 + titleLabel.frame.width + 8, y: (headerHeight - 14) / 2)
+        headerView.addSubview(sessionIdLabel)
+
+        let statusLabel = makeSystemLabel(session.status, size: 14, weight: .regular, color: statusColor)
+        statusLabel.sizeToFit()
+        statusLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - statusLabel.frame.width, y: (headerHeight - 14) / 2)
+        headerView.addSubview(statusLabel)
+
+        let headerItem = NSMenuItem()
+        headerItem.view = headerView
+        menu.addItem(headerItem)
+        menu.addItem(NSMenuItem.separator())
+
+        // -- Current Tool --
+        if session.status == "running", let tool = session.currentTool {
+            let toolSectionHeader = NSMenuItem()
+            let toolHeaderView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 24))
+            let toolHeaderLabel = makeSectionHeader("CURRENT TOOL")
+            toolHeaderLabel.frame.origin = CGPoint(x: kPadding, y: 6)
+            toolHeaderView.addSubview(toolHeaderLabel)
+            toolSectionHeader.view = toolHeaderView
+            menu.addItem(toolSectionHeader)
+
+            let toolText = tool.summary.isEmpty ? tool.toolName : "\(tool.toolName): \(tool.summary)"
+            let maxToolW = kContentWidth - 4
+            let truncatedTool = truncateToWidth(toolText, maxWidth: maxToolW, font: NSFont.systemFont(ofSize: 13))
+            let toolRowView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 28))
+            let toolLabel = makeSystemLabel(truncatedTool, size: 13, weight: .regular, color: .labelColor)
+            toolLabel.frame.origin = CGPoint(x: kPadding + 4, y: 6)
+            toolRowView.addSubview(toolLabel)
+            let toolItem = NSMenuItem()
+            toolItem.view = toolRowView
+            menu.addItem(toolItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        // -- Sub Agents for this session --
+        let sessionAgents = s.agents.filter { $0.sessionId == session.sessionId }
+        let runningAgents = sessionAgents.filter { $0.status == "running" }.count
+        let agentHeaderTitle = sessionAgents.isEmpty ? "SUB AGENTS" : "SUB AGENTS (\(runningAgents) running)"
+
+        let agentHeaderItem = NSMenuItem()
+        let agentHeaderView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 28))
+        let agentHeader = makeSectionHeader(agentHeaderTitle)
+        agentHeader.frame.origin = CGPoint(x: kPadding, y: 10)
+        agentHeaderView.addSubview(agentHeader)
+        agentHeaderItem.view = agentHeaderView
+        menu.addItem(agentHeaderItem)
+
+        if sessionAgents.isEmpty {
+            let emptyView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 28))
+            let emptyLabel = makeSystemLabel("No sub agents", size: 13, weight: .regular, color: .secondaryLabelColor)
+            emptyLabel.frame.origin = CGPoint(x: kPadding + 4, y: 6)
+            emptyView.addSubview(emptyLabel)
+            let emptyItem = NSMenuItem()
+            emptyItem.view = emptyView
+            menu.addItem(emptyItem)
+        } else {
+            let sorted = sessionAgents.sorted { a, b in
+                let order = ["running": 0, "errored": 1, "completed": 2]
+                return (order[a.status] ?? 3) < (order[b.status] ?? 3)
+            }
+            for agent in sorted {
+                let item = NSMenuItem()
+                item.view = makeAgentRowView(agent)
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(NSMenuItem.separator())
+
+        // -- Usage Section --
+        if session.usage.totalTokens > 0 || session.usage.toolUses > 0 {
+            let usageHeaderItem = NSMenuItem()
+            let usageHeaderView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 24))
+            let usageHeader = makeSectionHeader("USAGE")
+            usageHeader.frame.origin = CGPoint(x: kPadding, y: 6)
+            usageHeaderView.addSubview(usageHeader)
+            usageHeaderItem.view = usageHeaderView
+            menu.addItem(usageHeaderItem)
+
+            var usageParts: [String] = []
+            if session.usage.totalTokens > 0 {
+                usageParts.append("Tokens: \(formatTokenCount(session.usage.totalTokens))")
+            }
+            if session.usage.toolUses > 0 {
+                usageParts.append("Tools: \(session.usage.toolUses)")
+            }
+            let usageText = usageParts.joined(separator: "  |  ")
+            let usageRowView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 28))
+            let usageLabel = makeSystemLabel(usageText, size: 13, weight: .regular, color: .labelColor)
+            usageLabel.frame.origin = CGPoint(x: kPadding + 4, y: 6)
+            usageRowView.addSubview(usageLabel)
+            let usageItem = NSMenuItem()
+            usageItem.view = usageRowView
+            menu.addItem(usageItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        // -- Session ID --
+        let sessionInfoView = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: 28))
+        let sessionInfoLabel = makeSystemLabel("Session: \(shortId)…", size: 12, weight: .regular, color: .tertiaryLabelColor)
+        sessionInfoLabel.frame.origin = CGPoint(x: kPadding, y: 6)
+        sessionInfoView.addSubview(sessionInfoLabel)
+        let sessionInfoItem = NSMenuItem()
+        sessionInfoItem.view = sessionInfoView
+        menu.addItem(sessionInfoItem)
+        menu.addItem(NSMenuItem.separator())
 
         // -- Quit --
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -1240,17 +1453,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 numColor: .systemOrange
             ))
         }
-        if let startStr = s.sessionStartTime, !startStr.isEmpty,
-           let startDate = AppDelegate.iso8601.date(from: startStr) {
-            let elapsedSecs = Int(Date().timeIntervalSince(startDate))
-            if elapsedSecs > 0 {
-                row2.append(CountItem(
-                    number: formatDuration(elapsedSecs * 1000),
-                    label: "Session",
-                    numColor: .systemPurple
-                ))
-            }
-        }
         if s.usage.toolUses > 0 {
             row2.append(CountItem(
                 number: "\(s.usage.toolUses)",
@@ -1364,8 +1566,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         for (i, msg) in messages.enumerated() {
             let y = totalHeight - headerH - CGFloat(i + 1) * rowH
-            let fromName = agentNameMap[msg.fromId] ?? String(msg.fromId.prefix(8))
-            let toName = agentNameMap[msg.toId] ?? String(msg.toId.prefix(8))
+            let fromName = agentNameMap[msg.fromId] ?? String(msg.fromId.prefix(12))
+            let toName = agentNameMap[msg.toId] ?? String(msg.toId.prefix(12))
             let msgText = "\(fromName) -> \(toName) (\(msg.type))"
             let maxW = kContentWidth - 8
             let truncMsg = truncateToWidth(msgText, maxWidth: maxW, font: NSFont.systemFont(ofSize: 10))
@@ -1413,12 +1615,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func makeBossView(_ s: AgentState) -> NSView {
         let hasToolInfo = s.currentTool != nil && s.bossStatus == "running"
-        let rowHeight: CGFloat = hasToolInfo ? 64 : 48
+        let rowHeight: CGFloat = hasToolInfo ? 56 : 40
         let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: rowHeight))
-
-        let header = makeSectionHeader("BOSS")
-        header.frame.origin = CGPoint(x: kPadding, y: rowHeight - 16)
-        view.addSubview(header)
 
         let (statusText, statusColor): (String, NSColor)
         switch s.bossStatus {
@@ -1437,10 +1635,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusColor = .secondaryLabelColor
         }
 
-        let textIndent: CGFloat = kPadding + 22
-        let mainLineY: CGFloat = hasToolInfo ? 24 : 8
+        let textIndent: CGFloat = kPadding + 18
+        let mainLineY: CGFloat = hasToolInfo ? rowHeight - 22 : (rowHeight - 16) / 2
 
-        let dotLabel = makeSystemLabel("\u{25CF}", size: 14, weight: .regular, color: statusColor)
+        let dotLabel = makeSystemLabel("\u{25CF}", size: 13, weight: .regular, color: statusColor)
         dotLabel.frame.origin = CGPoint(x: kPadding, y: mainLineY)
         view.addSubview(dotLabel)
 
@@ -1453,7 +1651,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - statusLabel.frame.width, y: mainLineY + 1)
         view.addSubview(statusLabel)
 
-        // Current tool info (third line)
+        // Current tool info (second line)
         if hasToolInfo, let tool = s.currentTool {
             let toolText: String
             if tool.summary.isEmpty {
@@ -1461,12 +1659,139 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 toolText = "\(tool.toolName): \(tool.summary)"
             }
-            let maxToolWidth = kContentWidth - 22
+            let maxToolWidth = kContentWidth - 18
             let truncatedTool = truncateToWidth(toolText, maxWidth: maxToolWidth, font: NSFont.systemFont(ofSize: 11))
             let toolLabel = makeSystemLabel(truncatedTool, size: 11, weight: .regular, color: .tertiaryLabelColor)
-            toolLabel.frame.origin = CGPoint(x: textIndent, y: 6)
+            toolLabel.frame.origin = CGPoint(x: textIndent, y: 4)
             view.addSubview(toolLabel)
         }
+
+        return view
+    }
+
+    func makeClickableBossView(_ s: AgentState, session: PerSessionState) -> NSView {
+        let hasToolInfo = s.currentTool != nil && s.bossStatus == "running"
+        let rowHeight: CGFloat = hasToolInfo ? 56 : 40
+        let view = ClickableRow(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: rowHeight))
+        view.onClick = { [weak self] in
+            self?.selectedSession = session
+            self?.buildMenu()
+        }
+
+        let (statusText, statusColor): (String, NSColor)
+        switch s.bossStatus {
+        case "running":
+            if s.running > 0 {
+                statusText = "running (\(s.running) agent\(s.running == 1 ? "" : "s") active)"
+            } else {
+                statusText = "running"
+            }
+            statusColor = .systemBlue
+        case "done":
+            statusText = "done (\(s.completed) completed\(s.errored > 0 ? ", \(s.errored) errored" : ""))"
+            statusColor = .systemGreen
+        default:
+            statusText = "idle"
+            statusColor = .secondaryLabelColor
+        }
+
+        let textIndent: CGFloat = kPadding + 18
+        let mainLineY: CGFloat = hasToolInfo ? rowHeight - 22 : (rowHeight - 16) / 2
+
+        let dotLabel = makeSystemLabel("\u{25CF}", size: 13, weight: .regular, color: statusColor)
+        dotLabel.frame.origin = CGPoint(x: kPadding, y: mainLineY)
+        view.addSubview(dotLabel)
+
+        let bossLabel = makeSystemLabel("Boss (\(s.bossModel))", size: 13, weight: .semibold, color: .labelColor)
+        bossLabel.frame.origin = CGPoint(x: textIndent, y: mainLineY)
+        view.addSubview(bossLabel)
+
+        // Chevron
+        let chevron = makeSystemLabel("\u{203A}", size: 14, weight: .regular, color: .tertiaryLabelColor)
+        chevron.sizeToFit()
+        chevron.frame.origin = CGPoint(x: textIndent + bossLabel.frame.width + 4, y: mainLineY)
+        view.addSubview(chevron)
+
+        let statusLabel = makeSystemLabel(statusText, size: 12, weight: .regular, color: statusColor)
+        statusLabel.sizeToFit()
+        statusLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - statusLabel.frame.width, y: mainLineY + 1)
+        view.addSubview(statusLabel)
+
+        // Current tool info (second line)
+        if hasToolInfo, let tool = s.currentTool {
+            let toolText: String
+            if tool.summary.isEmpty {
+                toolText = tool.toolName
+            } else {
+                toolText = "\(tool.toolName): \(tool.summary)"
+            }
+            let maxToolWidth = kContentWidth - 18
+            let truncatedTool = truncateToWidth(toolText, maxWidth: maxToolWidth, font: NSFont.systemFont(ofSize: 11))
+            let toolLabel = makeSystemLabel(truncatedTool, size: 11, weight: .regular, color: .tertiaryLabelColor)
+            toolLabel.frame.origin = CGPoint(x: textIndent, y: 4)
+            view.addSubview(toolLabel)
+        }
+
+        return view
+    }
+
+    func makeSessionBossRow(_ session: PerSessionState, model: String) -> NSView {
+        let hasToolInfo = session.status == "running" && session.currentTool != nil
+        let rowHeight: CGFloat = hasToolInfo ? 56 : 40
+        let view = ClickableRow(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: rowHeight))
+        view.onClick = { [weak self] in
+            self?.selectedSession = session
+            self?.buildMenu()
+        }
+
+        let shortId = String(session.sessionId.prefix(12))
+        let (_, statusColor) = statusDisplay(session.status)
+
+        let textIndent: CGFloat = kPadding + 18
+        let mainLineY: CGFloat = hasToolInfo ? rowHeight - 22 : (rowHeight - 16) / 2
+
+        // Status dot
+        let dotLabel = makeSystemLabel("\u{25CF}", size: 13, weight: .regular, color: statusColor)
+        dotLabel.frame.origin = CGPoint(x: kPadding, y: mainLineY)
+        view.addSubview(dotLabel)
+
+        // Boss (model) session-id...
+        let bossText = "Boss (\(model)) \(shortId)…"
+        let bossLabel = makeSystemLabel(bossText, size: 13, weight: .semibold, color: .labelColor)
+        bossLabel.frame.origin = CGPoint(x: textIndent, y: mainLineY)
+        view.addSubview(bossLabel)
+
+        // Chevron
+        let chevron = makeSystemLabel("\u{203A}", size: 14, weight: .regular, color: .tertiaryLabelColor)
+        chevron.sizeToFit()
+        chevron.frame.origin = CGPoint(x: textIndent + bossLabel.frame.width + 4, y: mainLineY)
+        view.addSubview(chevron)
+
+        // Status text (right-aligned)
+        var statusText = session.status
+        if session.running > 0 {
+            statusText = "\(session.status) (\(session.running) agent\(session.running == 1 ? "" : "s"))"
+        }
+        let statusLabel = makeSystemLabel(statusText, size: 12, weight: .regular, color: statusColor)
+        statusLabel.sizeToFit()
+        statusLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - statusLabel.frame.width, y: mainLineY + 1)
+        view.addSubview(statusLabel)
+
+        // Current tool info (second line)
+        if hasToolInfo, let tool = session.currentTool {
+            let toolText = tool.summary.isEmpty ? tool.toolName : "\(tool.toolName): \(tool.summary)"
+            let maxToolWidth = kContentWidth - 18
+            let truncatedTool = truncateToWidth(toolText, maxWidth: maxToolWidth, font: NSFont.systemFont(ofSize: 11))
+            let toolLabel = makeSystemLabel(truncatedTool, size: 11, weight: .regular, color: .tertiaryLabelColor)
+            toolLabel.frame.origin = CGPoint(x: textIndent, y: 4)
+            view.addSubview(toolLabel)
+        }
+
+        // Subtle separator
+        let border = NSView(frame: NSRect(x: textIndent, y: 0, width: kContentWidth - 18, height: 1))
+        border.wantsLayer = true
+        border.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        view.addSubview(border)
 
         return view
     }
@@ -1609,6 +1934,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toolLabel.lineBreakMode = .byTruncatingTail
         view.addSubview(toolLabel)
 
+        // Countdown timer
+        if let createdDate = AppDelegate.iso8601.date(from: approval.createdAt) {
+            let elapsed = Int(Date().timeIntervalSince(createdDate))
+            let remaining = max(0, 60 - elapsed)
+            let countdownLabel = makeMonoLabel("\(remaining)s", size: 11, weight: .regular, color: remaining <= 10 ? .systemRed : .secondaryLabelColor)
+            countdownLabel.sizeToFit()
+            countdownLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - countdownLabel.frame.width, y: height - 22)
+            view.addSubview(countdownLabel)
+        }
+
         // Allow button
         let allowBtn = makeActionButton(title: "Allow", color: .systemGreen, x: kPadding, y: 4, width: 80)
         allowBtn.onClick = { [weak self] in
@@ -1733,11 +2068,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         request.timeoutInterval = 3
         let body = try? JSONSerialization.data(withJSONObject: ["requestId": requestId, "decision": decision])
         request.httpBody = body
-        URLSession.shared.dataTask(with: request) { [weak self] _, _, _ in
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            if let error = error {
+                NSLog("[AgentMenuBar] Approval response error: %@", error.localizedDescription)
+            } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 300 {
+                NSLog("[AgentMenuBar] Approval response HTTP %d", httpResponse.statusCode)
+            }
             DispatchQueue.main.async {
                 self?.fetchState()
             }
         }.resume()
+    }
+
+    func notifyMenuState(open: Bool) {
+        guard let url = URL(string: "http://127.0.0.1:\(serverPort)/menu-open") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 2
+        let body = try? JSONSerialization.data(withJSONObject: ["open": open])
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
     }
 
     func toggleApproval() {
@@ -1874,6 +2225,53 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "errored":   return ("\u{25CF}", .systemRed)
         default:          return ("\u{25CF}", .secondaryLabelColor)
         }
+    }
+
+    // MARK: - Session Header View
+
+    func makeSessionHeaderView(_ session: PerSessionState) -> NSView {
+        let hasToolInfo = session.status == "running" && session.currentTool != nil
+        let height: CGFloat = hasToolInfo ? 60 : 36
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: kMenuWidth, height: height))
+
+        let shortId = String(session.sessionId.prefix(12))
+        let (_, statusColor) = statusDisplay(session.status)
+
+        let mainY: CGFloat = hasToolInfo ? height - 20 : (height - 16) / 2
+
+        // Status dot
+        let dot = makeSystemLabel("\u{25CF}", size: 11, weight: .regular, color: statusColor)
+        dot.frame.origin = CGPoint(x: kPadding, y: mainY)
+        view.addSubview(dot)
+
+        // Session label
+        let label = makeSectionHeader("SESSION \(shortId)")
+        label.frame.origin = CGPoint(x: kPadding + 16, y: mainY + 1)
+        view.addSubview(label)
+
+        // Status + summary on right side
+        var rightParts: [String] = []
+        if session.running > 0 { rightParts.append("\(session.running) running") }
+        if session.usage.totalTokens > 0 { rightParts.append(formatTokenCount(session.usage.totalTokens)) }
+        if !rightParts.isEmpty {
+            let rightText = rightParts.joined(separator: " | ")
+            let rightLabel = makeSystemLabel(rightText, size: 10, weight: .regular, color: .tertiaryLabelColor)
+            rightLabel.sizeToFit()
+            rightLabel.frame.origin = CGPoint(x: kMenuWidth - kPadding - rightLabel.frame.width, y: mainY + 2)
+            view.addSubview(rightLabel)
+        }
+
+        // Tool info line (if running)
+        if hasToolInfo, let tool = session.currentTool {
+            let toolText = tool.summary.isEmpty ? tool.toolName : "\(tool.toolName): \(tool.summary)"
+            let maxW = kContentWidth - 16
+            let truncated = truncateToWidth(toolText, maxWidth: maxW, font: NSFont.systemFont(ofSize: 10))
+            let toolLabel = makeSystemLabel(truncated, size: 10, weight: .regular, color: .tertiaryLabelColor)
+            toolLabel.frame.origin = CGPoint(x: kPadding + 16, y: 4)
+            view.addSubview(toolLabel)
+        }
+
+        return view
     }
 }
 

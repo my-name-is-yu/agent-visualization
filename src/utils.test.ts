@@ -65,26 +65,14 @@ describe('makeKey', () => {
 
 describe('isError', () => {
   it('returns true when is_error is true', () => {
-    expect(isError(true, 'success')).toBe(true);
+    expect(isError(true)).toBe(true);
   });
 
   it('returns false when is_error is false', () => {
-    expect(isError(false, 'Error: something')).toBe(false);
+    expect(isError(false)).toBe(false);
   });
 
-  it('detects error patterns in output', () => {
-    expect(isError(undefined, 'Error: connection failed')).toBe(true);
-    expect(isError(undefined, 'Operation failed')).toBe(true);
-    expect(isError(undefined, 'Exception thrown')).toBe(true);
-    expect(isError(undefined, 'Traceback (most recent call last)')).toBe(true);
-  });
-
-  it('returns false for normal output', () => {
-    expect(isError(undefined, 'Task completed successfully')).toBe(false);
-  });
-
-  it('returns false for non-string output', () => {
-    expect(isError(undefined, null)).toBe(false);
-    expect(isError(undefined, undefined)).toBe(false);
+  it('returns false when is_error is undefined', () => {
+    expect(isError(undefined)).toBe(false);
   });
 });

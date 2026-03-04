@@ -10,6 +10,10 @@ export function getDb(): Database.Database {
   return db;
 }
 
+export function closeDb(): void {
+  if (db) db.close();
+}
+
 export function initDb(): void {
   db = new Database(config.dbPath);
   db.pragma('journal_mode = WAL');
@@ -62,6 +66,7 @@ export function initDb(): void {
 let _stmts: ReturnType<typeof prepareStatements> | null = null;
 
 function stmts() {
+  if (!db) throw new Error('[db] Database not initialized. Call initDb() first.');
   if (!_stmts) _stmts = prepareStatements();
   return _stmts;
 }
@@ -116,7 +121,7 @@ function agentToRow(a: AgentRecord): Record<string, unknown> {
     duration_ms: a.duration_ms,
     error: a.error,
     output_preview: a.output_preview,
-    output_file: a.output_file,
+    output_file: null,
     parent_id: a.parent_id,
     usage_tokens: a.usage?.total_tokens ?? null,
     usage_tool_uses: a.usage?.tool_uses ?? null,
@@ -141,7 +146,6 @@ function rowToAgent(row: Record<string, unknown>): AgentRecord {
     duration_ms: row.duration_ms as number | null,
     error: row.error as string | null,
     output_preview: row.output_preview as string | null,
-    output_file: row.output_file as string | null,
     parent_id: row.parent_id as string,
     usage: hasUsage ? {
       total_tokens: (row.usage_tokens as number) || 0,
