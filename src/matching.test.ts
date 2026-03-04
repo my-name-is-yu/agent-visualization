@@ -1,62 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { findMatchingAgent, findTaskOutputAgent, findDeepestRunningAgent } from './matching.js';
+import { findTaskOutputAgent, findDeepestRunningAgent } from './matching.js';
 import type { AgentRecord } from './types.js';
 import { makeAgent } from './__fixtures__/events.js';
-
-describe('findMatchingAgent', () => {
-  let agents: Map<string, AgentRecord>;
-
-  beforeEach(() => {
-    agents = new Map();
-  });
-
-  it('matches by tool_use_id (Tier 1)', () => {
-    const agent = makeAgent({ id: 'tu_001' });
-    agents.set('tu_001', agent);
-
-    const result = findMatchingAgent(agents, 'tu_001', undefined);
-    expect(result).toBe(agent);
-  });
-
-  it('matches by agentId (Tier 2)', () => {
-    const agent = makeAgent({ id: 'some-key', agentId: 'agent_123' });
-    agents.set('some-key', agent);
-
-    const result = findMatchingAgent(agents, undefined, 'agent_123');
-    expect(result).toBe(agent);
-  });
-
-  it('prefers tool_use_id over agentId', () => {
-    const agent1 = makeAgent({ id: 'tu_001', agentId: 'agent_123' });
-    const agent2 = makeAgent({ id: 'tu_002', agentId: 'agent_123' });
-    agents.set('tu_001', agent1);
-    agents.set('tu_002', agent2);
-
-    const result = findMatchingAgent(agents, 'tu_001', 'agent_123');
-    expect(result).toBe(agent1);
-  });
-
-  it('skips non-running agents', () => {
-    const agent = makeAgent({ id: 'tu_001', status: 'completed' });
-    agents.set('tu_001', agent);
-
-    const result = findMatchingAgent(agents, 'tu_001', undefined);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when no match found', () => {
-    const agent = makeAgent({ id: 'tu_001' });
-    agents.set('tu_001', agent);
-
-    const result = findMatchingAgent(agents, 'tu_999', undefined);
-    expect(result).toBeNull();
-  });
-
-  it('returns null and warns when neither id provided', () => {
-    const result = findMatchingAgent(agents, undefined, undefined);
-    expect(result).toBeNull();
-  });
-});
 
 describe('findTaskOutputAgent', () => {
   let agents: Map<string, AgentRecord>;

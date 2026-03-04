@@ -8,6 +8,7 @@ export interface Config {
   autoResetMs: number;
   cleanupMs: number;
   turnStaleMs: number;
+  inactivityDoneMs: number;
   staleAgentMs: number;
   maxMessages: number;
   sseKeepAliveMs: number;
@@ -25,6 +26,7 @@ interface ConfigFile {
   autoResetSeconds?: number;
   cleanupMinutes?: number;
   turnStaleMs?: number;
+  inactivityDoneMs?: number;
   staleAgentMs?: number;
   maxMessages?: number;
   sseKeepAliveMs?: number;
@@ -67,6 +69,7 @@ export function loadConfig(): Config {
     autoResetMs: envInt('AGENT_VIZ_AUTO_RESET_SECONDS', file.autoResetSeconds ?? 60) * 1000,
     cleanupMs: envInt('AGENT_VIZ_CLEANUP_MINUTES', file.cleanupMinutes ?? 30) * 60 * 1000,
     turnStaleMs: file.turnStaleMs ?? 600_000,
+    inactivityDoneMs: file.inactivityDoneMs ?? 15_000,
     staleAgentMs: file.staleAgentMs ?? 300_000,
     maxMessages: file.maxMessages ?? 200,
     sseKeepAliveMs: file.sseKeepAliveMs ?? 20_000,

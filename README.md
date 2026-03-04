@@ -110,15 +110,6 @@ Add these signals to your CLAUDE.md so the menu bar reflects Boss activity:
 curl -sX POST http://127.0.0.1:1217/heartbeat > /dev/null 2>&1
 ```
 
-**Background Agent Completion Signal** — call when a background agent finishes:
-
-```bash
-curl -sX POST http://127.0.0.1:1217/complete \
-  -H "Content-Type: application/json" \
-  -d '{"description":"<agent description>","result":"<output>","tokens":<n>,"tool_uses":<n>,"duration_ms":<n>}' \
-  > /dev/null 2>&1
-```
-
 See the [multi-agent protocol setup](https://github.com/my-name-is-yu/claude-code-multi-agent-setup) for a complete CLAUDE.md template.
 
 ## Environment variables
@@ -141,7 +132,6 @@ Set environment variables in the LaunchAgent plist at `~/Library/LaunchAgents/co
 | `GET` | `/events` | SSE stream for state-change notifications |
 | `POST` | `/event` | Receive hook events from Claude Code |
 | `POST` | `/heartbeat` | Signal Boss activity |
-| `POST` | `/complete` | Signal background agent completion |
 | `POST` | `/reset` | Clear all state |
 
 ## Troubleshooting

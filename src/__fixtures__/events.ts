@@ -38,27 +38,6 @@ export const samplePostEventCompleted = {
   tool_output: 'Fixed the login bug by updating the auth handler.\n<usage>\ntotal_tokens: 5000\ntool_uses: 12\nduration_ms: 30000\n</usage>',
 };
 
-export const sampleCompleteEvent = {
-  description: 'Research auth module',
-  result: 'Found 3 relevant files in src/auth/',
-  tokens: 10000,
-  tool_uses: 25,
-  duration_ms: 45000,
-  is_error: false,
-  agent_id: 'agent_123',
-  tool_use_id: 'tu_001',
-};
-
-export const sampleCompleteEventError = {
-  description: 'Deploy service',
-  result: 'Error: Connection timeout',
-  tokens: 500,
-  tool_uses: 2,
-  duration_ms: 5000,
-  is_error: true,
-  tool_use_id: 'tu_err',
-};
-
 export function makeAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: 'test-agent-001',

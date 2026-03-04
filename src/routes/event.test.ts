@@ -126,11 +126,10 @@ vi.mock('../db.js', async () => {
 });
 
 import { agents, initState, resetState, sessionUsage, sessionStates } from '../state.js';
-import { samplePreEvent, samplePostEvent, samplePostEventCompleted, sampleCompleteEvent } from '../__fixtures__/events.js';
+import { samplePreEvent, samplePostEvent, samplePostEventCompleted } from '../__fixtures__/events.js';
 
 // Import route handlers and create mock req/res
 import eventRouter from './event.js';
-import completeRouter from './complete.js';
 
 function createMockRes() {
   const res: any = {
@@ -157,8 +156,6 @@ function getHandler(router: any, method: string, path: string) {
 }
 
 const eventHandler = getHandler(eventRouter, 'post', '/event');
-const completeHandler = getHandler(completeRouter, 'post', '/complete');
-
 describe('POST /event', () => {
   beforeEach(() => {
     initState();
@@ -302,60 +299,3 @@ describe('POST /event', () => {
   });
 });
 
-describe('POST /complete', () => {
-  beforeEach(() => {
-    initState();
-    resetState();
-  });
-
-  it('completes a matching agent and aggregates usage', () => {
-    // Create agent first via pre-phase event
-    const preReq = createMockReq(samplePreEvent);
-    eventHandler(preReq, createMockRes());
-    // Set agentId on the record (simulates post-phase bg launch)
-    const agent = agents.get(samplePreEvent.tool_use_id)!;
-    agent.agentId = 'agent_123';
-
-    // Send /complete
-    const req = createMockReq(sampleCompleteEvent);
-    const res = createMockRes();
-    completeHandler(req, res);
-
-    expect(res._json).toEqual({ ok: true });
-    expect(agent.status).toBe('completed');
-    expect(agent.usage!.total_tokens).toBe(10000);
-    expect(sessionUsage.agent_count).toBe(1);
-    expect(sessionUsage.total_tokens).toBe(10000);
-  });
-
-  it('returns ok:false when no matching agent found', () => {
-    const req = createMockReq({
-      description: 'Unknown agent',
-      agent_id: 'nonexistent',
-      tool_use_id: 'nonexistent',
-    });
-    const res = createMockRes();
-    completeHandler(req, res);
-
-    expect(res._json).toEqual({ ok: false, reason: 'no_matching_agent' });
-  });
-
-  it('marks agent as errored when is_error is true', () => {
-    const preReq = createMockReq(samplePreEvent);
-    eventHandler(preReq, createMockRes());
-
-    const req = createMockReq({
-      ...sampleCompleteEvent,
-      is_error: true,
-      result: 'Error: something went wrong',
-      tool_use_id: samplePreEvent.tool_use_id,
-    });
-    const res = createMockRes();
-    completeHandler(req, res);
-
-    expect(res._json).toEqual({ ok: true });
-    const agent = agents.get(samplePreEvent.tool_use_id)!;
-    expect(agent.status).toBe('errored');
-    expect(agent.error).toBe('Error: something went wrong');
-  });
-});

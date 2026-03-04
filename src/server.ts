@@ -5,7 +5,6 @@ import { sseClients, runCleanup, initState } from './state.js';
 import stateRoutes from './routes/state.js';
 import sseRoutes from './routes/sse.js';
 import eventRoutes from './routes/event.js';
-import completeRoutes from './routes/complete.js';
 import approvalRoutes from './routes/approval.js';
 
 // Initialize SQLite + load state
@@ -23,7 +22,6 @@ app.use(express.json({ limit: '5mb' }));
 app.use(stateRoutes);
 app.use(sseRoutes);
 app.use(eventRoutes);
-app.use(completeRoutes);
 app.use(approvalRoutes);
 
 // SSE keep-alive

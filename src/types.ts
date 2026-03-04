@@ -141,18 +141,6 @@ export const HookEventSchema = z.object({
 });
 export type HookEvent = z.infer<typeof HookEventSchema>;
 
-export const CompleteEventSchema = z.object({
-  description: z.string().optional(),
-  result: z.string().optional(),
-  tokens: z.number().optional(),
-  tool_uses: z.number().optional(),
-  duration_ms: z.number().optional(),
-  is_error: z.boolean().optional(),
-  agent_id: z.string().optional(),
-  tool_use_id: z.string().optional(),
-});
-export type CompleteEvent = z.infer<typeof CompleteEventSchema>;
-
 export const ApprovalRequestSchema = z.object({
   toolName: z.string().default('unknown'),
   toolInput: z.record(z.unknown()).default({}),

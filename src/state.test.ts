@@ -200,8 +200,8 @@ describe('state management', () => {
 
     it('sets boss status to done when all agents finished', () => {
       agents.set('a1', makeAgent({ id: 'a1', status: 'completed' }));
-      // Simulate that a session was active (events occurred)
-      setLastEventTime(Date.now() - 60_000); // last event 60s ago (beyond bossActiveMs)
+      // Simulate that a session was recently active (within DONE_TO_IDLE_MS window)
+      setLastEventTime(Date.now() - 5_000); // last event 5s ago (within 10s done→idle threshold)
       const state = buildState();
       expect(state.boss.status).toBe('done');
     });
@@ -305,13 +305,22 @@ describe('state management', () => {
       expect(buildState().boss.status).toBe('done');
     });
 
-    it('stays running during long thinking (no events for 30s+ but within turnStaleMs)', () => {
+    it('stays running when heartbeat is recent even if lastEvent is old', () => {
       const now = Date.now();
       onHeartbeat(now - 5000);
-      // Last event was 31s ago — beyond bossActiveMs (30s) but within turnStaleMs (10min)
+      // Last event was 31s ago, but heartbeat was 5s ago — lastKnownActivity = 5s → still active
       setLastEventTime(now - 31_000);
-      // No turn-done sent; turn is NOT abandoned → turnInProgress is true → running
       expect(buildState().boss.status).toBe('running');
+    });
+
+    it('transitions to done after 15s inactivity without explicit turn-done', () => {
+      const now = Date.now();
+      // Heartbeat 20s ago, last event 16s ago — beyond 15s inactivity threshold
+      onHeartbeat(now - 20_000);
+      setLastEventTime(now - 16_000);
+      // inactivityDone = true → turnInProgress = false
+      // sessionStartTime set, heartbeat stale (>10s) → idle
+      expect(buildState().boss.status).toBe('idle');
     });
 
     it('falls back to done after turnStaleMs inactivity without turn-done', () => {

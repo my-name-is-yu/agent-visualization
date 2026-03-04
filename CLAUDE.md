@@ -38,7 +38,6 @@ Approval flow is separate: `approval-hook.js` → POST `/approval/request` → l
 
 - **hook.js and approval-hook.js are plain JS** (not TypeScript, not compiled). They run directly as Claude Code hooks and must stay that way.
 - **Agent keying**: Agents are keyed in `Map` by `tool_use_id`. Fallback key is a 12-char SHA1 of `session_id:description` (via `makeKey`).
-- **Two-tier agent lookup** in `/complete`: matches by `tool_use_id` first, then by `agentId` (extracted from async agent output).
 - **`notifyClients()`** is the single mutation gate — it pushes SSE events AND flushes dirty agents to SQLite. Always call it after state changes.
 - **Two-layer persistence**: in-memory Map for speed, SQLite (`~/.agent-visualization.db`) for crash recovery. Dirty tracking (`dirtyAgentIds: Set`) batches DB writes.
 - **Auto-reset**: when all agents complete, a timer (default 60s) clears state and snapshots the session into `lastSessionSummary`.

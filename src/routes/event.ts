@@ -44,7 +44,6 @@ router.post('/event', (req, res) => {
     const matchedRecord = findTaskOutputAgent(agents, taskId, session_id);
 
     if (matchedRecord) {
-      // Guard: skip if already completed by /complete endpoint
       if (matchedRecord.status !== 'running') {
         notifyClients();
         res.json({ ok: true });
@@ -79,6 +78,13 @@ router.post('/event', (req, res) => {
   const key = bodyToolUseId || makeKey(session_id, description);
 
   if (hook_phase === 'pre') {
+    // Only create agent records for actual Agent tool calls (not Task/TaskOutput)
+    if (tool_name !== 'Agent') {
+      notifyClients();
+      res.json({ ok: true });
+      return;
+    }
+
     cancelAutoReset();
 
     // Check if this is a new batch — reset if no running agents and enough time passed

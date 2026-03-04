@@ -126,7 +126,7 @@ let autoResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 // New session detection threshold (2 minutes of inactivity = new session)
 const NEW_SESSION_THRESHOLD_MS = 120_000;
-// Done → idle transition threshold
+// Done → idle transition threshold (checked against most recent of heartbeat or event time)
 const DONE_TO_IDLE_MS = 10_000;
 
 /**
@@ -455,10 +455,10 @@ function countAgents(): {
 
 function isTurnInProgress(heartbeat: number, turnDone: number, lastActivity: number, now: number): boolean {
   const lastKnownActivity = Math.max(heartbeat, lastActivity);
-  const turnAbandoned = lastKnownActivity > 0 && (now - lastKnownActivity) > config.turnStaleMs;
+  const inactivityMs = lastKnownActivity > 0 ? now - lastKnownActivity : 0;
   return heartbeat > 0
     && heartbeat > turnDone
-    && !turnAbandoned;
+    && inactivityMs < config.inactivityDoneMs;
 }
 
 function buildSessions(agentCounts: Map<string, AgentCounts>): PerSessionState[] {
@@ -475,14 +475,14 @@ function buildSessions(agentCounts: Map<string, AgentCounts>): PerSessionState[]
     const hasRunning = counts.running > 0;
     const turnInProgress = timing != null
       && isTurnInProgress(timing.lastHeartbeatTime, timing.lastTurnDoneTime, timing.lastEventTime, now);
-    const heartbeatStale = timing != null
-      && timing.lastHeartbeatTime > 0
-      && (now - timing.lastHeartbeatTime) > DONE_TO_IDLE_MS;
+    const lastActivity = Math.max(timing?.lastHeartbeatTime || 0, timing?.lastEventTime || 0);
+    const activityStale = lastActivity > 0
+      && (now - lastActivity) > DONE_TO_IDLE_MS;
 
     let status: PerSessionState['status'];
     if (hasRunning || turnInProgress) {
       status = 'running';
-    } else if (timing?.sessionStartTime && !heartbeatStale) {
+    } else if (timing?.sessionStartTime && !activityStale) {
       status = 'done';
     } else {
       status = 'idle';
@@ -521,12 +521,13 @@ export function buildState(): AppState {
     const hasRunningAgents = summary.running > 0;
     const now = Date.now();
     const turnInProgress = isTurnInProgress(lastHeartbeatTime, lastTurnDoneTime, lastEventTime, now);
-    const heartbeatStale = lastHeartbeatTime > 0
-      && (now - lastHeartbeatTime) > DONE_TO_IDLE_MS;
+    const lastActivity = Math.max(lastHeartbeatTime, lastEventTime);
+    const activityStale = lastActivity > 0
+      && (now - lastActivity) > DONE_TO_IDLE_MS;
 
     if (hasRunningAgents || turnInProgress) {
       bossStatus = 'running';
-    } else if (sessionStartTime && !heartbeatStale) {
+    } else if (sessionStartTime && !activityStale) {
       bossStatus = 'done';
     }
   }
